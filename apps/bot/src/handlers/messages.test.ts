@@ -2,7 +2,7 @@ import type { Message } from 'discord.js';
 import { describe, expect, it } from 'vitest';
 import { makeGuild } from '@equinox/core/testing';
 import { createFakeContext, OTHER_TENANT, TENANT } from '../test-helpers.js';
-import { scanMessage } from './messages.js';
+import { scanMessage, SeenEdits } from './messages.js';
 
 function fakeMessage(content: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -15,6 +15,29 @@ function fakeMessage(content: string, overrides: Record<string, unknown> = {}) {
     ...overrides,
   } as unknown as Message;
 }
+
+describe('SeenEdits', () => {
+  it('ignores updates that aren’t edits, like link previews loading', () => {
+    expect(new SeenEdits().isNew('1', null)).toBe(false);
+  });
+
+  it('passes each edit once, even when the same edit is delivered again', () => {
+    const seen = new SeenEdits();
+    expect(seen.isNew('1', 1000)).toBe(true);
+    expect(seen.isNew('1', 1000)).toBe(false);
+    expect(seen.isNew('1', 2000)).toBe(true);
+    expect(seen.isNew('2', 1000)).toBe(true);
+  });
+
+  it('stays bounded by forgetting the oldest message', () => {
+    const seen = new SeenEdits(2);
+    seen.isNew('1', 1000);
+    seen.isNew('2', 1000);
+    seen.isNew('3', 1000);
+    expect(seen.isNew('3', 1000)).toBe(false);
+    expect(seen.isNew('1', 1000)).toBe(true);
+  });
+});
 
 describe('scanMessage (link sensor)', () => {
   it('turns a scam link into a detection with message context', async () => {

@@ -146,6 +146,23 @@ describe('alert buttons', () => {
     expect(replyText(replies)).toMatch(/Restored by/);
   });
 
+  it('restore after a delete says the message can’t be brought back', async () => {
+    const t = createFakeContext(makeGuild({ id: TENANT, mode: 'protect', modRoleIds: [MOD_ROLE] }));
+    const detection = await detect(t, { heuristicScore: 0.95 });
+    expect(detection.actionsTaken.map((a) => a.action)).toContain('delete');
+    const { interaction, replies } = fakeButton(reviewCustomId('restore', detection.id), MOD);
+    await handleInteraction(interaction, t.ctx);
+    expect(replyText(replies)).toMatch(/can’t be brought back/);
+  });
+
+  it('confirm after a delete has no restore warning', async () => {
+    const t = createFakeContext(makeGuild({ id: TENANT, mode: 'protect', modRoleIds: [MOD_ROLE] }));
+    const detection = await detect(t, { heuristicScore: 0.95 });
+    const { interaction, replies } = fakeButton(reviewCustomId('confirm', detection.id), MOD);
+    await handleInteraction(interaction, t.ctx);
+    expect(replyText(replies)).not.toMatch(/can’t be brought back/);
+  });
+
   it('false positive on a link allowlists the exact host in this tenant only', async () => {
     const t = createFakeContext();
     const detection = await detect(t, { subject: 'https://cdn.partner.example/x' });

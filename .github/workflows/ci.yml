@@ -32,8 +32,9 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
+      # Build first: type-aware lint resolves @equinox/* imports through each package's dist/*.d.ts.
       - run: pnpm build
+      - run: pnpm lint
       - run: pnpm typecheck
       # Integration tests start Postgres and Redis with Testcontainers (Docker is on ubuntu runners).
       - run: pnpm test

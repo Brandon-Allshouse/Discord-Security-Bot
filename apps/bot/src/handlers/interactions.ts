@@ -318,6 +318,11 @@ async function handleButton(interaction: ButtonInteraction<'cached'>, ctx: BotCo
 
   const notes: string[] = result.reverted.map((r) => `${r.ok ? '↩️' : '❌'} undo ${r.action}${r.detail ? ` (${r.detail})` : ''}`);
 
+  // Discord has no undelete and we don't keep message text, so say so instead of implying it came back.
+  if (parsed.decision !== 'confirm' && result.detection.actionsTaken.some((a) => a.action === 'delete' && a.ok)) {
+    notes.push(`⚠️ The deleted message can’t be brought back. <@${result.detection.userId}> has to post it again.`);
+  }
+
   // A false positive on a link means that host is fine here: allowlist it so it isn't flagged again.
   // Exact host only, never the parent domain, so one click can't open up every subdomain.
   if (parsed.decision === 'false_positive' && result.detection.signalKind === 'url') {

@@ -1,4 +1,4 @@
-import { Client, Events, GatewayIntentBits, Options } from 'discord.js';
+import { Client, Events, GatewayIntentBits, Options, Partials } from 'discord.js';
 import { Redis } from 'ioredis';
 import { loadConfig } from '@equinox/config';
 import { createDb, createStores } from '@equinox/db';
@@ -6,7 +6,7 @@ import { createLimits, type BotContext } from './context.js';
 import { DiscordActionExecutor } from './executor.js';
 import { offboardGuild, onboardGuild } from './handlers/guilds.js';
 import { handleInteraction } from './handlers/interactions.js';
-import { scanMessage } from './handlers/messages.js';
+import { scanMessage, SeenEdits } from './handlers/messages.js';
 import { CachedGuildRepository, IndicatorService } from './indicators.js';
 import { createLogger } from './logger.js';
 import { registerCommands } from './register.js';
@@ -21,7 +21,10 @@ const client = new Client({
   allowedMentions: { parse: [] },
   // Don't cache messages. We read each one as it arrives and then let it go.
   makeCache: Options.cacheWithLimits({ ...Options.DefaultMakeCacheSettings, MessageManager: 0 }),
+  // Without this, discord.js drops edit events for messages that aren't cached, which is all of them.
+  partials: [Partials.Message],
 });
+const seenEdits = new SeenEdits();
 
 const dbHandle = createDb(config.DATABASE_URL);
 const stores = createStores(dbHandle.db);
@@ -79,9 +82,9 @@ client.on(Events.InteractionCreate, safely('interaction', (interaction) => handl
 client.on(Events.MessageCreate, safely('messageCreate', (message) => scanMessage(message, ctx)));
 client.on(
   Events.MessageUpdate,
-  safely('messageUpdate', async (before, after) => {
+  safely('messageUpdate', async (_before, after) => {
     // Scammers edit harmless messages into links after they pass review.
-    if (after.partial || before.content === after.content) return;
+    if (after.partial || !seenEdits.isNew(after.id, after.editedTimestamp)) return;
     await scanMessage(after, ctx);
   }),
 );
