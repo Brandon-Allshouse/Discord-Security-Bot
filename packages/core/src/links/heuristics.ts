@@ -124,6 +124,17 @@ export function foldHomoglyphs(label: string): string {
   return mapped.replace(/rn/g, 'm').replace(/vv/g, 'w').replace(/ci/g, 'd').replace(/[^a-z]/g, '');
 }
 
+/** Brand keywords never change, so each is folded once instead of on every link. */
+const SKELETONS = new Map<string, string>();
+function skeletonOf(keyword: string): string {
+  let skeleton = SKELETONS.get(keyword);
+  if (skeleton === undefined) {
+    skeleton = foldHomoglyphs(keyword);
+    SKELETONS.set(keyword, skeleton);
+  }
+  return skeleton;
+}
+
 /** Smallest edit distance between `keyword` and any similar-length window of `text`. */
 function minWindowDistance(text: string, keyword: string, max: number): number {
   let best = max + 1;
@@ -140,21 +151,34 @@ function minWindowDistance(text: string, keyword: string, max: number): number {
 const BAIT_WORDS =
   /gift|nitro|free|claim|promo|drop|verify|login|auth|bonus|reward|event|giveaway|support|trade|restore|recover|connect|secure|sync|validate|mint/;
 
-/** Damerau-Levenshtein (optimal string alignment) distance, capped for speed. */
+/**
+ * Damerau-Levenshtein (optimal string alignment) distance, capped for speed: the exact distance
+ * when it's at most `max`, otherwise `max + 1`. Runs on every lookalike check, so it keeps only
+ * the three rows it needs and stops as soon as the answer can't come back under `max`.
+ */
 export function editDistance(a: string, b: string, max = 3): number {
   if (Math.abs(a.length - b.length) > max) return max + 1;
-  const rows = a.length + 1;
   const cols = b.length + 1;
-  const d: number[][] = Array.from({ length: rows }, (_, i) => Array.from({ length: cols }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
-  for (let i = 1; i < rows; i++) {
+  let older = new Array<number>(cols).fill(0); // row i - 2, for transpositions
+  let previous = Array.from({ length: cols }, (_, j) => j); // row i - 1
+  let current = new Array<number>(cols).fill(0);
+  let previousMin = 0;
+  for (let i = 1; i <= a.length; i++) {
+    current[0] = i;
+    let rowMin = i;
     for (let j = 1; j < cols; j++) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      let value = Math.min(d[i - 1]![j]! + 1, d[i]![j - 1]! + 1, d[i - 1]![j - 1]! + cost);
-      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) value = Math.min(value, d[i - 2]![j - 2]! + 1);
-      d[i]![j] = value;
+      let value = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) value = Math.min(value, older[j - 2]! + 1);
+      current[j] = value;
+      if (value < rowMin) rowMin = value;
     }
+    // Every later cell builds on one of the last two rows, so once both are over `max`, so is the answer.
+    if (rowMin > max && previousMin > max) return max + 1;
+    previousMin = rowMin;
+    [older, previous, current] = [previous, current, older];
   }
-  return d[a.length]![b.length]!;
+  return Math.min(previous[b.length]!, max + 1);
 }
 
 /** The brand's own domains and popular sites. Never scored, and never sent to outside intel sources. */
@@ -207,7 +231,7 @@ export function assessUrl(url: NormalizedUrl, messageText = ''): LinkAssessment 
       }
       for (const keyword of brand.keywords) {
         if (named.includes(keyword)) continue;
-        const skeleton = foldHomoglyphs(keyword);
+        const skeleton = skeletonOf(keyword);
         // Spelled differently but looks the same: "dlscord", "d1sc0rd", Cyrillic letters.
         if (folded.includes(skeleton)) {
           record(brand.name, 'homoglyph');
