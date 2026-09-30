@@ -11,6 +11,59 @@ The standards:
 
 If something marked ✅ turns out not to hold, that's a vulnerability. Please report it the way [SECURITY.md](../SECURITY.md) describes.
 
+## Coverage by standard
+
+Every OWASP Top 10 (2025) category and every ASVS 5.0 chapter, with where it's handled or why it doesn't apply yet. The detailed rows are in the sections below.
+
+### OWASP Top 10 (2025)
+
+| Category | How Equinox handles it | Sections |
+|---|---|---|
+| A01 Broken Access Control | Tenant isolation in the database (row-level security), deny-by-default roles, per-request server checks in the API, IDOR tests; SSRF is covered here too | [Tenant isolation](#tenant-isolation), [Access control](#access-control), [Dashboard](#dashboard) |
+| A02 Security Misconfiguration | Config validated at startup, no secrets in images, least-privilege containers, strict HTTP headers, per-service settings | [Configuration and secrets](#configuration-and-secrets), [Dashboard](#dashboard) |
+| A03 Software Supply Chain Failures | Frozen lockfile, exact versions, install scripts blocked, 3-day release delay, audit in CI, pinned Actions, Dependabot | [Supply chain](#supply-chain-and-how-we-build) |
+| A04 Cryptographic Failures | Only Node's crypto; 256-bit random tokens; HMAC-SHA256 service signatures; hashed session storage; constant-time comparisons; https required in production | [Cryptography](#cryptography) |
+| A05 Injection | Validated input everywhere (zod), parameterized SQL, auto-escaping templates, markdown-escaped and defanged alerts | [Input validation](#input-validation-and-injection) |
+| A06 Insecure Design | A written threat model (what each part can reach, what a compromise exposes), the ground rules enforced by tests, fail-closed defaults, rate limits on every expensive path | [architecture.md](architecture.md), [Ground rules](#ground-rules-and-what-enforces-them) |
+| A07 Authentication Failures | Login through Discord OAuth with a browser-bound state; no passwords stored; sessions rotated at login, expire in an hour, stored hashed; service-to-service requests authenticated | [Dashboard](#dashboard), [Cryptography](#cryptography) |
+| A08 Software or Data Integrity Failures | Signed requests between services, validated messages over Redis, append-only audit log, frozen lockfile; network-wide indicators need scoring and review (M5) | [Dashboard](#dashboard), [Audit and logging](#audit-and-logging), [Tenant isolation](#tenant-isolation) |
+| A09 Logging and Alerting Failures | Everything audited, structured logs with secrets redacted, references instead of stack traces; metrics and alerting come in M9 | [Audit and logging](#audit-and-logging) |
+| A10 Mishandling of Exceptional Conditions | One failed action never stops the rest; outages fall back to local checks; errors never leak details | [Audit and logging](#audit-and-logging), [Input validation](#input-validation-and-injection) |
+
+### OWASP ASVS 5.0
+
+| Chapter | Status | Where |
+|---|---|---|
+| V1 Encoding and Sanitization | ✅ | [Input validation](#input-validation-and-injection) |
+| V2 Validation and Business Logic | ✅ | [Input validation](#input-validation-and-injection), rate limits |
+| V3 Web Frontend Security | ✅ | [Dashboard](#dashboard) (CSP, cookies, CSRF, framing) |
+| V4 API and Web Service | ✅ | [Dashboard](#dashboard): the API accepts only signed JSON, validates every body, answers with fixed error codes and is never published |
+| V5 File Handling | Not applicable yet | No files are accepted anywhere. File scanning (M6) hashes attachments as they stream and never stores or opens them |
+| V6 Authentication | ✅ | Delegated to Discord OAuth; no passwords. [Dashboard](#dashboard) |
+| V7 Session Management | ✅ | [Dashboard](#dashboard) |
+| V8 Authorization | ✅ | [Tenant isolation](#tenant-isolation), [Access control](#access-control) |
+| V9 Self-contained Tokens | Not applicable | Sessions are opaque random IDs looked up server-side; there are no JWTs or other self-contained tokens |
+| V10 OAuth and OIDC | ✅ | [Dashboard](#dashboard) (authorization code flow, state, minimal scopes, token revoked after use) |
+| V11 Cryptography | ✅ | [Cryptography](#cryptography) |
+| V12 Secure Communication | 🟡 | https required for the dashboard in production; TLS to Postgres and Redis and between services ⏳ M9 |
+| V13 Configuration | ✅ | [Configuration and secrets](#configuration-and-secrets) |
+| V14 Data Protection | ✅ | [Privacy](#privacy-and-keeping-data-to-a-minimum) |
+| V15 Secure Coding and Architecture | ✅ | [architecture.md](architecture.md), [Supply chain](#supply-chain-and-how-we-build) |
+| V16 Security Logging and Error Handling | ✅ | [Audit and logging](#audit-and-logging) |
+| V17 WebRTC | Not applicable | Equinox uses no WebRTC |
+
+## Cryptography
+
+| Control | Standard | Where | Status |
+|---|---|---|---|
+| Only Node's built-in crypto; no home-made algorithms | 800-53 SC-13 · ASVS V11 · Top 10: Cryptographic Failures | `node:crypto` throughout | ✅ |
+| Session IDs, CSRF tokens and OAuth states are 256-bit values from the system's secure random generator; request nonces are 144-bit | 800-53 SC-23 · ASVS V11, V7 | `newToken` in `apps/api/src/sessions.ts`, `/auth/login` in `apps/dashboard/src/app.ts`, `signApiRequest`; test `issues random 256-bit IDs` | ✅ |
+| Session IDs are stored only as SHA-256 hashes, so reading Redis doesn't reveal usable sessions | 800-53 SC-28 · ASVS V7 | `RedisSessionStore` | ✅ |
+| Service-to-service requests use HMAC-SHA256 with keys of at least 256 bits, enforced at startup | 800-53 IA-9, SC-12, SC-13 · ASVS V11, V13 | `api-contract.ts`, `dashboard-contract.ts`, `hexKey` in `packages/config` | ✅ |
+| Tokens, states and signatures are compared in constant time | ASVS V11 | `timingSafeEqual` in the API, dashboard and contracts | ✅ |
+| The dashboard must be served over https in production (config refuses otherwise), with HSTS | 800-53 SC-8 · ASVS V12 | `loadDashboardConfig`, `loadApiConfig` | ✅ |
+| TLS between the dashboard and the API, and to Postgres and Redis | 800-53 SC-8 · ASVS V12 | — | ⏳ M9 |
+
 ## Tenant isolation
 
 Each Discord server is a tenant. One server's data should never show up in another's. The only thing shared across the network is indicators (bad domains, URLs, file hashes).
@@ -48,7 +101,20 @@ Each Discord server is a tenant. One server's data should never show up in anoth
 
 ## Dashboard
 
-The web dashboard (`apps/dashboard`) is a separate process from the bot. It reads and writes tenant data through the same row-level-security stores.
+The web dashboard (`apps/dashboard`) is the frontend. It renders pages only and talks to one thing, the API (`apps/api`), which reads and writes tenant data through the same row-level-security stores as the bot. See [architecture.md](architecture.md).
+
+| Control | Standard | Where | Status |
+|---|---|---|---|
+| The frontend never talks to a database: the dashboard has no database, Redis or Discord credentials, and its image contains no database or Redis client | 800-53 AC-6, SC-7 · ASVS V13 · Top 10: Broken Access Control | `dashboardConfigSchema` (test `holds no database, Redis or Discord secrets`), `apps/dashboard/package.json` | ✅ |
+| Network separation: the dashboard is only on the `frontend` network and can reach only the API; the API isn't published outside Docker | 800-53 SC-7 (boundary protection) | `networks` in `docker-compose.yml` | ✅ |
+| Every dashboard → API request is signed (HMAC-SHA256 over timestamp, nonce, method, path, session and body hash) and refused if unsigned, more than 60 s off, altered, moved to another session, or replayed | 800-53 IA-9, SC-8, SC-23 · ASVS V13 | `signApiRequest` / `verifyApiRequest` in `packages/core/src/api-contract.ts`, nonces in `apps/api/src/nonces.ts`, tests in `apps/api/src/app.test.ts` → `only the dashboard can talk to the API` | ✅ |
+| The dashboard validates every API answer against the contract and never renders one that doesn't match; errors are fixed codes | ASVS V1 · 800-53 SI-10 | `ApiClient` in `apps/dashboard/src/api-client.ts`, tests in `api-client.test.ts` | ✅ |
+| Separate keys for dashboard → API and API → bot, enforced at startup, so the frontend can never sign bot requests | 800-53 AC-6, IA-9 | `loadApiConfig`, test `refuses the same key for signing API and bot requests` | ✅ |
+| Every container gets only the settings it uses, listed by name (none reads the whole `.env`) | 800-53 AC-6, CM-7 | `docker-compose.yml`, config schemas | ✅ |
+| Traffic between the dashboard and the API is plain HTTP inside Docker's private network | 800-53 SC-8 | signed, but not encrypted | 🟡 TLS between services ⏳ M9 |
+| Each service has its own Redis user (ACLs), so for example only the API can touch sessions | 800-53 AC-6 | — | ⏳ M9 |
+
+The controls below apply to the dashboard and the API together; each says where it lives.
 
 | Control | Standard | Where | Status |
 |---|---|---|---|
@@ -59,13 +125,13 @@ The web dashboard (`apps/dashboard`) is a separate process from the bot. It read
 | Sessions are random 256-bit IDs in Redis, stored under their SHA-256 hash, expire after an hour, and are replaced at every login | 800-53 SC-23, AC-12 · ASVS V7 | `sessions.ts`, tests in `auth.test.ts` | ✅ |
 | Session and state cookies are HttpOnly and SameSite=Lax, and Secure whenever the dashboard is served over https; production refuses to start on plain http | ASVS V3 · 800-53 SC-8 | `cookieOptions`, `loadDashboardConfig` | ✅ |
 | Over https, cookies use the `__Host-` prefix (Secure, whole site, this host only), so a subdomain or plain-http page can't plant or overwrite them | ASVS V3 | `cookieNames` in `app.ts`, test `served over https` | ✅ |
-| The dashboard never holds the bot token. Review, setup and test alerts are sent to the bot as requests signed with HMAC-SHA256 over a shared key, refused if unsigned, tampered or more than 2 minutes old | 800-53 IA-9, SC-8, AC-6 · ASVS V13 (service authentication) | `signAction` / `verifyAction` in `packages/core/src/dashboard-contract.ts`, tests in `dashboard-contract.test.ts` | ✅ |
+| Neither the dashboard nor the API holds the bot token. Review, setup and test alerts go from the API to the bot as requests signed with HMAC-SHA256 over a shared key, refused if unsigned, tampered or more than 2 minutes old | 800-53 IA-9, SC-8, AC-6 · ASVS V13 (service authentication) | `signAction` / `verifyAction` in `packages/core/src/dashboard-contract.ts`, tests in `dashboard-contract.test.ts` | ✅ |
 | Without a signing key, those dashboard buttons are off and the bot ignores requests, rather than falling back to unsigned requests | 800-53 AC-3 (fail closed) | `RedisBotLink.enabled`, `startDashboardWorker`, test `is off without a signing key` | ✅ |
 | The bot re-validates every dashboard request as if it came from the Discord command (channel postable, roles usable, detection in that server) and audits it under the user's ID with `via: dashboard` | 800-53 AC-3, AU-2, AU-3 | `handleDashboardAction`, `setupProblem`, tests in `moderation.test.ts` → `handleDashboardAction` | ✅ |
 | Requests to the bot are POSTs with the CSRF token, only for servers the user manages, limited to 30 a minute per user, with IDs and decisions validated before anything is sent | ASVS V3, V8, V2 · Top 10: Broken Access Control | `actionTenant` in `app.ts`, tests in `actions.test.ts` | ✅ |
 | The bot's answers are fixed result codes mapped to fixed messages; nothing the bot or Discord returns is echoed into pages | ASVS V1 · Top 10: Injection | `OUTCOME_REDIRECT`, test `maps every bot answer to a fixed message` | ✅ |
 | A request the bot didn't pick up in time is withdrawn, so it can't run after the user was told nothing changed | Top 10: Mishandling of Exceptional Conditions | `RedisBotLink.send`, test `times out when no bot picks the request up` | ✅ |
-| The server snapshot the dashboard reads holds channel and role names and permission flags only, is size-capped, validated on read, and expires | 800-53 AC-21, SI-10 · ASVS V14 | `buildSnapshot`, `guildSnapshotSchema` | ✅ |
+| The server snapshot the API reads for the dashboard holds channel and role names and permission flags only, is size-capped, validated on read, and expires | 800-53 AC-21, SI-10 · ASVS V14 | `buildSnapshot`, `guildSnapshotSchema` | ✅ |
 | Resolving a detection anywhere updates its alerts in Discord and removes their buttons, so nobody acts on a stale alert | 800-53 AU-2 | `resolveAlertMessages`, tests in `moderation.test.ts` | ✅ |
 | Every form carries a per-session CSRF token, compared in constant time | ASVS V3 · 800-53 SC-23 | `csrfOk`, test `rejects forms without the CSRF token` | ✅ |
 | All page output goes through an auto-escaping template | ASVS V1 (output encoding) · Top 10: Injection | `html.ts`, test `escapes names and subjects that contain markup` | ✅ |
@@ -125,7 +191,7 @@ The web dashboard (`apps/dashboard`) is a separate process from the bot. It read
 | `DEV_GUILD_ID` isn't allowed in production | 800-53 CM-6 | `loadConfig` | ✅ |
 | Postgres and Redis need passwords and only listen on 127.0.0.1 | 800-53 CM-7, SC-7 · Top 10: Security Misconfiguration | `docker-compose.yml` | ✅ |
 | Containers run as a non-root user on a read-only filesystem, with all capabilities dropped and no privilege escalation | 800-53 CM-7, AC-6 | `apps/*/Dockerfile`, `docker-compose.yml` | ✅ |
-| The dashboard container gets the OAuth client secret but never the bot token | 800-53 AC-6 | `dashboardConfigSchema`, `docker-compose.yml` | ✅ |
+| Only the API gets the OAuth client secret; the dashboard gets no secrets but its API key, and the bot never gets the OAuth secret | 800-53 AC-6 | `apiConfigSchema`, `dashboardConfigSchema`, `docker-compose.yml` | ✅ |
 | The intel worker, which visits links strangers post, gets no Discord credentials at all | 800-53 AC-6, SC-7 | `workerConfigSchema`, `docker-compose.yml` | ✅ |
 | Intel API keys are only sent as headers, never in URLs, and are blanked out of logs | 800-53 IA-5 · ASVS V13 | `virustotal.ts`, `logRedactPaths` | ✅ |
 | TLS to Postgres/Redis in production (`sslmode`, `rediss://`) | 800-53 SC-8 · ASVS V12 | `rediss:` accepted by config | 🟡 supported, not required yet |
@@ -139,6 +205,7 @@ The web dashboard (`apps/dashboard`) is a separate process from the bot. It read
 | Install scripts are blocked unless a package is explicitly allowed | SSDF PW.4 · Top 10: Software Supply Chain Failures | `onlyBuiltDependencies` / `ignoredBuiltDependencies` in `pnpm-workspace.yaml` | ✅ |
 | Package versions less than 3 days old aren't installed | SSDF PW.4 | `minimumReleaseAge` | ✅ |
 | CI runs `pnpm audit` and fails on high or critical issues | SSDF RV.1 · 800-53 RA-5 | `ci.yml` | ✅ |
+| Known-vulnerable transitive dependencies, dev tools included, are forced to patched versions; a full `pnpm audit` (dev included) is clean | SSDF RV.1, PW.4 · 800-53 SI-2 | `overrides` in `pnpm-workspace.yaml` (esbuild under drizzle-kit, GHSA-67mh-4wv8-2f99) | ✅ |
 | Dependabot updates npm packages, Actions, the Docker base image and Compose images, waiting 3 days on new releases to match pnpm | SSDF RV.1 · 800-53 SI-2 | `.github/dependabot.yml` | ✅ |
 | The CI token is read-only and checkout doesn't keep credentials around | SSDF PO.5 | `ci.yml` | ✅ |
 | Strict TypeScript, type-aware linting, and no `eval` or anything like it | SSDF PW.5 | `tsconfig.base.json`, `eslint.config.js` | ✅ |

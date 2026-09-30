@@ -9,15 +9,15 @@ import {
   QUEUE_PREFIX,
   shardForGuild,
   signAction,
+  type BotOutcome,
   type DashboardAction,
-  type DashboardResultCode,
   type GuildSnapshot,
 } from '@equinox/core';
 
 /** What came of a request to the bot. `off` means no signing key is configured. */
-export type SendOutcome = DashboardResultCode | 'timeout' | 'bot_unavailable' | 'off';
+export type SendOutcome = BotOutcome;
 
-/** How the dashboard reaches the bot. The dashboard never holds the bot token. */
+/** How the API reaches the bot. Neither the API nor the dashboard ever holds the bot token. */
 export interface BotLink {
   /** Whether review, setup and test buttons can work at all (a signing key is configured). */
   readonly enabled: boolean;

@@ -48,6 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: docker build -f apps/api/Dockerfile -t equinox-api:ci .
       - run: docker build -f apps/bot/Dockerfile -t equinox-bot:ci .
       - run: docker build -f apps/dashboard/Dockerfile -t equinox-dashboard:ci .
       - run: docker build -f apps/worker/Dockerfile -t equinox-worker:ci .

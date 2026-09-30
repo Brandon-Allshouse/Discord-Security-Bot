@@ -50,12 +50,13 @@ The latest 50 entries. Changes made on the dashboard are marked `via: dashboard`
 
 ## How it's kept safe
 
-- **No bot token in the dashboard.** Things that need Discord permissions (review, setup, test alert) are sent to the bot as requests, **signed** with a key only the bot and the dashboard share. The bot refuses any request that isn't signed, or is more than two minutes old, checks everything again, and records it in the audit log under your Discord ID.
+- **The dashboard holds nothing.** It's the frontend: it renders pages and gets everything from the API, through requests signed with `API_SIGNING_KEY` that can't be forged, changed or replayed. It has no database, Redis or Discord credentials, and on Docker's network it can reach only the API. See [architecture.md](architecture.md).
+- **No bot token outside the bot.** Things that need Discord permissions (review, setup, test alert) go from the API to the bot as requests signed with a second key, `INTERNAL_SIGNING_KEY`. The bot refuses any request that isn't signed, or is more than two minutes old, checks everything again, and records it in the audit log under your Discord ID.
 - **Only your servers.** Every page and every button checks that you manage that server. Another server's page answers "Not found", the same as a server that doesn't exist.
 - **Forms can't be forged from other sites.** Every form carries a secret token tied to your session.
-- **Short sessions.** Sessions last an hour, get a new ID at every login, and are stored under a hash so reading the database doesn't hand out sessions. Discord's access token is handed back right after login, never stored.
+- **Short sessions.** The API keeps sessions: they last an hour, get a new ID at every login, and are stored under a hash so reading Redis doesn't hand out sessions. Discord's access token is handed back right after login, never stored.
 - **Strict pages.** No scripts are allowed at all (Content-Security-Policy), pages can't be framed, and nothing is cached. Over https, cookies are `Secure` and use the `__Host-` prefix, and HSTS is sent.
-- **Rate limits.** 120 requests a minute per address, 10 logins, 10 link checks and 30 review, setup or test requests a minute per person.
+- **Rate limits.** The dashboard limits each address (120 requests and 10 logins a minute); the API limits each person (10 link checks and 30 review, setup or test requests a minute).
 
 Details and the standards behind them: [SECURITY.md](../SECURITY.md) and [security-controls.md](security-controls.md#dashboard).
 
@@ -63,18 +64,19 @@ Details and the standards behind them: [SECURITY.md](../SECURITY.md) and [securi
 
 In the [Discord developer portal](https://discord.com/developers/applications), open your application → **OAuth2**:
 
-1. Copy the **Client Secret** into `DISCORD_CLIENT_SECRET` in `.env`.
+1. Copy the **Client Secret** into `DISCORD_CLIENT_SECRET` in `.env`. Only the API gets it.
 2. Under **Redirects**, add `http://localhost:3000/auth/callback` (or your public address + `/auth/callback`) and click **Save Changes**.
 
 In `.env`:
 
 | Variable | What it is |
 |---|---|
-| `DISCORD_CLIENT_SECRET` | From the OAuth2 page. The dashboard only; the bot never uses it. |
+| `DISCORD_CLIENT_SECRET` | From the OAuth2 page. The API only; the dashboard and the bot never see it. |
+| `API_SIGNING_KEY` | Required. Signs every dashboard → API request. Generate with `openssl rand -hex 32` in Git Bash; the dashboard and the API both read it from `.env`. |
 | `DASHBOARD_URL` | The public address, default `http://localhost:3000`. Must be `https://` in production. |
-| `INTERNAL_SIGNING_KEY` | Signs dashboard → bot requests. Generate with `openssl rand -hex 32` in Git Bash (on Windows; it comes with Git for Windows) and use the same value for both (both read `.env`). Without it, review, setup and test on the dashboard are off and the page says so; everything else works. |
+| `INTERNAL_SIGNING_KEY` | Signs API → bot requests. Generate with `openssl rand -hex 32` in Git Bash (on Windows; it comes with Git for Windows); the API and the bot both read it from `.env`. It must be different from `API_SIGNING_KEY`. Without it, review, setup and test on the dashboard are off and the page says so; everything else works. |
 
-Then `docker compose up -d --build`. The dashboard container gets the OAuth secret and the signing key but never the bot token.
+Then `docker compose up -d --build`. The dashboard container gets only `DASHBOARD_URL`, `API_URL` and `API_SIGNING_KEY`.
 
 ## Troubleshooting
 
@@ -84,7 +86,9 @@ Then `docker compose up -d --build`. The dashboard container gets the OAuth secr
 | "Login failed. The login didn't complete." | You opened the dashboard at a different address than `DASHBOARD_URL` (`127.0.0.1` instead of `localhost`). | Use the exact `DASHBOARD_URL` address. `docker compose logs dashboard` says which check failed. |
 | Your server isn't listed | You don't have Manage Server there, or Equinox isn't in it. | Check both, then log out and in again. |
 | "This needs INTERNAL_SIGNING_KEY…" | No signing key configured. | Add it to `.env` (see above) and rebuild the bot and dashboard. |
-| "The bot refused the request…" | The bot and the dashboard have different signing keys. | Use the same value for both, then rebuild both. |
+| "The bot refused the request…" | The bot and the API have different `INTERNAL_SIGNING_KEY` values. | Use the same value for both, then rebuild both. |
+| "Temporarily unavailable" on every page | The API is down, or the dashboard and the API have different `API_SIGNING_KEY` values (`docker compose logs dashboard` says which). | `docker compose ps api`, `docker compose logs api`; check the key. |
+| "Something went wrong. Reference: …" | An unexpected error in the API. | `docker compose logs api` and search for that reference. |
 | "The bot isn't reachable" or "didn't answer in time" | The bot is down, restarting, or not connected to Discord. Nothing was changed. | `docker compose ps bot`, then `docker compose logs bot`. |
 | "The bot hasn't reported this server's channels and roles yet" | The bot hasn't sent this server's details (they refresh every few minutes and on every channel or role change). | Wait a minute, or check that the bot is running. |
 | A warning about missing permissions | The bot's role lost a permission it needs. | Server Settings → Roles → the bot's role. |

@@ -1,42 +1,19 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import cookie from '@fastify/cookie';
 import formbody from '@fastify/formbody';
 import { fastify, LogController, type FastifyBaseLogger, type FastifyReply, type FastifyRequest } from 'fastify';
-import {
-  checkLink,
-  domainCandidates,
-  GUILD_MODES,
-  parseDomainInput,
-  parseLinkInput,
-  RateLimiter,
-  REVIEW_DECISIONS,
-  type DashboardAction,
-  type GuildMode,
-  type GuildSettings,
-} from '@equinox/core';
-import type { AllowlistStore, AuditStore, DetectionStore, GuildStore } from '@equinox/db';
-import type { BotLink, SendOutcome } from './bot-link.js';
-import type { DiscordOAuth } from './discord-oauth.js';
+import { RateLimiter, type BotOutcome } from '@equinox/core';
+import { ApiError, type ApiClient } from './api-client.js';
 import type { Html } from './html.js';
-import type { DashboardIntel } from './intel.js';
-import { newToken, SESSION_TTL_SECONDS, type Session, type SessionStore } from './sessions.js';
 import { checkResultPage, ERRORS, landingPage, messagePage, NOTICES, serversPage, STYLESHEET, tenantPage } from './views.js';
 
-/** The tenant-scoped stores the dashboard uses. Everything goes through row-level security. */
-export interface DashboardStores {
-  guilds: Pick<GuildStore, 'get' | 'setMode'>;
-  detections: Pick<DetectionStore, 'recent' | 'countOpen'>;
-  audit: Pick<AuditStore, 'write' | 'recent'>;
-  allowlist: Pick<AllowlistStore, 'list' | 'add' | 'remove' | 'hasAny'>;
-}
-
+/**
+ * The dashboard is the frontend. It renders pages and handles the browser side of login
+ * (cookies, the OAuth state), and gets every piece of data from the API. It has no database,
+ * Redis or Discord credentials: see api-client.ts.
+ */
 export interface DashboardDeps {
-  stores: DashboardStores;
-  sessions: SessionStore;
-  oauth: DiscordOAuth;
-  intel: DashboardIntel;
-  /** Requests to the bot for things that need Discord permissions (review, setup, test alert). */
-  bot: BotLink;
+  api: ApiClient;
   /** Public address of the dashboard. Over https, cookies are marked Secure and HSTS is sent. */
   publicUrl: string;
   logger?: FastifyBaseLogger;
@@ -52,12 +29,14 @@ export function cookieNames(secure: boolean) {
   return { session: `${prefix}eq_session`, state: `${prefix}eq_oauth_state` };
 }
 const STATE_TTL_SECONDS = 10 * 60;
+/** Must match the API's session lifetime; the API is the one that actually expires sessions. */
+const SESSION_TTL_SECONDS = 60 * 60;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const SNOWFLAKE = /^\d{17,20}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Where to send the user after a request to the bot: a fixed notice or error key, never the bot's text. */
-const OUTCOME_REDIRECT: Record<SendOutcome, { notice: keyof typeof NOTICES } | { error: keyof typeof ERRORS }> = {
+const OUTCOME_REDIRECT: Record<BotOutcome, { notice: keyof typeof NOTICES } | { error: keyof typeof ERRORS }> = {
   reviewed: { notice: 'reviewed' },
   setup_saved: { notice: 'setup' },
   test_sent: { notice: 'test' },
@@ -95,7 +74,7 @@ function send(reply: FastifyReply, page: Html, status = 200): FastifyReply {
 }
 
 export async function buildApp(deps: DashboardDeps) {
-  const { stores, sessions, oauth, intel, bot } = deps;
+  const { api } = deps;
   const publicUrl = new URL(deps.publicUrl);
   const secure = publicUrl.protocol === 'https:';
   const app = fastify({
@@ -109,13 +88,10 @@ export async function buildApp(deps: DashboardDeps) {
 
   const cookieOptions = { path: '/', httpOnly: true, sameSite: 'lax', secure } as const;
   const { session: SESSION_COOKIE, state: STATE_COOKIE } = cookieNames(secure);
+  // Per address: the dashboard is the only part that sees who's connecting. Per-user limits live in the API.
   const limits = {
     requests: new RateLimiter(120, 60_000),
     logins: new RateLimiter(10, 60_000),
-    /** Per user. Each check of an unknown link can mean outside lookups by the intel worker. */
-    checks: new RateLimiter(10, 60_000),
-    /** Per user: review, setup and test requests to the bot. */
-    actions: new RateLimiter(30, 60_000),
   };
 
   app.addHook('onRequest', async (request, reply) => {
@@ -146,46 +122,74 @@ export async function buildApp(deps: DashboardDeps) {
   app.setNotFoundHandler((_request, reply) => send(reply, messagePage('Not found', 'There’s nothing here.'), 404));
 
   app.setErrorHandler((error, request, reply) => {
+    if (error instanceof ApiError) return apiFailure(request, reply, error);
     // Full details go to the log. The user just gets a short ref they can pass to us.
     const ref = randomUUID().slice(0, 8);
     request.log.error({ err: error, ref }, 'request failed');
     return send(reply, messagePage('Something went wrong', `Reference: ${ref}`), 500);
   });
 
-  async function currentSession(request: FastifyRequest): Promise<Session | null> {
-    const id = request.cookies[SESSION_COOKIE];
-    return id ? sessions.get(id) : null;
+  /** What the user sees when the API says no. Only fixed messages, never the API's own text. */
+  function apiFailure(request: FastifyRequest, reply: FastifyReply, error: ApiError): FastifyReply {
+    const guildId = field(request.params, 'guildId');
+    const back = SNOWFLAKE.test(guildId) ? `/servers/${guildId}` : '/servers';
+    switch (error.code) {
+      case 'unauthenticated':
+        // Session expired or logged out elsewhere: forget the cookie and start over.
+        return reply.clearCookie(SESSION_COOKIE, cookieOptions).redirect('/', 303);
+      case 'csrf':
+        return send(reply, messagePage('Expired', 'That form is out of date. Go back, reload and try again.'), 403);
+      case 'not_found':
+        return send(reply, messagePage('Not found', 'There’s nothing here.'), 404);
+      case 'rate_limited':
+        return send(reply, messagePage('Slow down', 'Too many requests in a minute. Try again shortly.'), 429);
+      case 'mode':
+      case 'domain':
+      case 'missing':
+      case 'url':
+        return reply.redirect(`${back}?error=${error.code}`, 303);
+      case 'signature':
+        // The dashboard and the API disagree about the signing key: an operator problem, not the user's.
+        request.log.error('the API rejected the dashboard’s signature: check API_SIGNING_KEY on both');
+        return send(reply, messagePage('Temporarily unavailable', 'Try again in a minute.'), 503);
+      case 'bad_request':
+        return send(reply, messagePage('Bad request', 'That request didn’t look right.'), 400);
+      default:
+        if (error.ref) {
+          // The API failed unexpectedly and logged the details under this reference.
+          request.log.error({ apiRef: error.ref }, 'API request failed');
+          return send(reply, messagePage('Something went wrong', `Reference: ${error.ref}`), 500);
+        }
+        request.log.warn({ status: error.status, code: error.code }, 'API unavailable');
+        return send(reply, messagePage('Temporarily unavailable', 'Try again in a minute.'), 503);
+    }
   }
 
-  /**
-   * Resolves the tenant in the URL for the logged-in user, or answers the request itself.
-   * A server the user can't manage and a server that doesn't exist look the same: 404.
-   */
-  async function tenantFor(
-    request: FastifyRequest,
-    reply: FastifyReply,
-  ): Promise<{ session: Session; guild: GuildSettings; name: string } | null> {
-    const session = await currentSession(request);
+  /** The session cookie's value, if it has the right shape. The API decides whether it's valid. */
+  function sessionCookie(request: FastifyRequest): string | null {
+    const id = request.cookies[SESSION_COOKIE];
+    return id && TOKEN.test(id) ? id : null;
+  }
+
+  /** The session and the server in the URL, or answers the request itself (log in, or 404). */
+  function tenantRequest(request: FastifyRequest, reply: FastifyReply): { session: string; guildId: string } | null {
+    const session = sessionCookie(request);
     if (!session) {
       void reply.redirect('/');
       return null;
     }
     const guildId = field(request.params, 'guildId');
-    const entry = SNOWFLAKE.test(guildId) ? session.guilds.find((g) => g.id === guildId) : undefined;
-    const guild = entry ? await stores.guilds.get(entry.id) : null;
-    if (!entry || !guild) {
-      if (!entry) request.log.warn({ userId: session.userId }, 'tenant access denied');
-      void send(reply, messagePage('Not found', 'There’s nothing here.', session), 404);
+    if (!SNOWFLAKE.test(guildId)) {
+      void send(reply, messagePage('Not found', 'There’s nothing here.'), 404);
       return null;
     }
-    return { session, guild, name: entry.name };
+    return { session, guildId };
   }
 
-  /** Every form carries the session's CSRF token. Answers 403 itself when it doesn't match. */
-  function csrfOk(request: FastifyRequest, reply: FastifyReply, session: Session): boolean {
-    if (sameToken(field(request.body, '_csrf'), session.csrf)) return true;
-    void send(reply, messagePage('Expired', 'That form is out of date. Go back, reload and try again.', session), 403);
-    return false;
+  async function botResult(reply: FastifyReply, guildId: string, outcome: Promise<BotOutcome>): Promise<FastifyReply> {
+    const target = OUTCOME_REDIRECT[await outcome];
+    const query = 'notice' in target ? `notice=${target.notice}` : `error=${target.error}`;
+    return reply.redirect(`/servers/${guildId}?${query}`, 303);
   }
 
   app.get('/healthz', (_request, reply) => reply.send({ ok: true }));
@@ -193,7 +197,7 @@ export async function buildApp(deps: DashboardDeps) {
   app.get('/static/style.css', (_request, reply) => reply.type('text/css; charset=utf-8').send(STYLESHEET));
 
   app.get('/', async (request, reply) => {
-    if (await currentSession(request)) return reply.redirect('/servers');
+    if (sessionCookie(request)) return reply.redirect('/servers');
     return send(reply, landingPage());
   });
 
@@ -209,8 +213,9 @@ export async function buildApp(deps: DashboardDeps) {
       return reply.redirect(new URL('/auth/login?moved=1', publicUrl).toString());
     }
     // The state ties the callback to this browser, so a login can't be started for someone else.
-    const state = newToken();
-    return reply.setCookie(STATE_COOKIE, state, { ...cookieOptions, maxAge: STATE_TTL_SECONDS }).redirect(oauth.authorizeUrl(state));
+    const state = randomBytes(32).toString('base64url');
+    const url = await api.authorizeUrl(state);
+    return reply.setCookie(STATE_COOKIE, state, { ...cookieOptions, maxAge: STATE_TTL_SECONDS }).redirect(url);
   });
 
   app.get('/auth/callback', async (request, reply) => {
@@ -232,79 +237,47 @@ export async function buildApp(deps: DashboardDeps) {
     if (problem) {
       // Which check failed, but none of the values.
       request.log.warn({ problem, deniedByUser: field(request.query, 'error') === 'access_denied' }, 'login callback rejected');
-      return send(
-        reply,
-        messagePage('Login failed', `The login didn’t complete. Open ${publicUrl.origin} and try again.`),
-        400,
-      );
+      return send(reply, messagePage('Login failed', `The login didn’t complete. Open ${publicUrl.origin} and try again.`), 400);
     }
 
-    let login;
+    let sessionId: string;
     try {
-      login = await oauth.login(code);
+      // The API exchanges the code with Discord and starts a fresh session; the old one stops working.
+      sessionId = await api.createSession(code, sessionCookie(request) ?? undefined);
     } catch (error) {
-      request.log.warn({ err: { message: error instanceof Error ? error.message : 'unknown' } }, 'discord login failed');
-      return send(reply, messagePage('Login failed', 'Discord didn’t confirm the login. Please try again.'), 502);
+      if (error instanceof ApiError && error.code === 'discord') {
+        return send(reply, messagePage('Login failed', 'Discord didn’t confirm the login. Please try again.'), 502);
+      }
+      throw error;
     }
-
-    // Always a fresh session ID at login, and the old one stops working.
-    const previous = request.cookies[SESSION_COOKIE];
-    if (previous) await sessions.destroy(previous);
-    const id = await sessions.create({
-      userId: login.user.id,
-      username: login.user.username,
-      csrf: newToken(),
-      guilds: login.manageableGuilds,
-    });
-    request.log.info({ userId: login.user.id }, 'login');
-    return reply.setCookie(SESSION_COOKIE, id, { ...cookieOptions, maxAge: SESSION_TTL_SECONDS }).redirect('/servers');
+    return reply.setCookie(SESSION_COOKIE, sessionId, { ...cookieOptions, maxAge: SESSION_TTL_SECONDS }).redirect('/servers');
   });
 
   app.post('/auth/logout', async (request, reply) => {
-    const session = await currentSession(request);
+    const session = sessionCookie(request);
     if (!session) return reply.redirect('/', 303);
-    if (!csrfOk(request, reply, session)) return reply;
-    await sessions.destroy(request.cookies[SESSION_COOKIE] ?? '');
+    await api.logout(session, field(request.body, '_csrf'));
     return reply.clearCookie(SESSION_COOKIE, cookieOptions).redirect('/', 303);
   });
 
   app.get('/servers', async (request, reply) => {
-    const session = await currentSession(request);
+    const session = sessionCookie(request);
     if (!session) return reply.redirect('/');
-    // Only servers that are active tenants, i.e. the bot is installed.
-    const found = await Promise.all(session.guilds.map(async (g) => ((await stores.guilds.get(g.id)) ? g : null)));
-    return send(reply, serversPage(session, found.filter((g) => g !== null)));
+    const me = await api.me(session);
+    return send(reply, serversPage({ username: me.user.username, csrf: me.csrf }, me.guilds));
   });
 
   app.get('/servers/:guildId', async (request, reply) => {
-    const tenant = await tenantFor(request, reply);
-    if (!tenant) return reply;
-    const { session, guild, name } = tenant;
-    const [openCount, detections, allowlist, audit, intelStatus, snapshot] = await Promise.all([
-      stores.detections.countOpen(guild.id),
-      stores.detections.recent(guild.id, 50),
-      stores.allowlist.list(guild.id),
-      stores.audit.recent(guild.id, 50),
-      // Intel and the bot's snapshot are extras: if Redis can't answer, the page still loads and says so.
-      intel.status().catch(() => null),
-      bot.snapshot(guild.id).catch(() => null),
-    ]);
+    const target = tenantRequest(request, reply);
+    if (!target) return reply;
+    const page = await api.guild(target.session, target.guildId);
     // Messages come from a fixed table, so nothing from the query string is ever shown.
     const notice = field(request.query, 'notice');
     const error = field(request.query, 'error');
     return send(
       reply,
       tenantPage({
-        session,
-        name,
-        guild,
-        openCount,
-        detections,
-        allowlist,
-        audit,
-        intelStatus,
-        snapshot,
-        botEnabled: bot.enabled,
+        ...page,
         notice: Object.hasOwn(NOTICES, notice) ? (notice as keyof typeof NOTICES) : undefined,
         error: Object.hasOwn(ERRORS, error) ? (error as keyof typeof ERRORS) : undefined,
       }),
@@ -312,160 +285,71 @@ export async function buildApp(deps: DashboardDeps) {
   });
 
   app.post('/servers/:guildId/mode', async (request, reply) => {
-    const tenant = await tenantFor(request, reply);
-    if (!tenant || !csrfOk(request, reply, tenant.session)) return reply;
-    const { session, guild } = tenant;
-    const mode = field(request.body, 'mode') as GuildMode;
-    if (!GUILD_MODES.includes(mode)) return reply.redirect(`/servers/${guild.id}?error=mode`, 303);
-
-    await stores.guilds.setMode(guild.id, mode);
-    await stores.audit.write({
-      guildId: guild.id,
-      actor: session.userId,
-      action: 'settings.mode',
-      target: null,
-      details: { from: guild.mode, to: mode, via: 'dashboard' },
-    });
-    return reply.redirect(`/servers/${guild.id}?notice=mode`, 303);
+    const target = tenantRequest(request, reply);
+    if (!target) return reply;
+    await api.setMode(target.session, target.guildId, field(request.body, '_csrf'), field(request.body, 'mode'));
+    return reply.redirect(`/servers/${target.guildId}?notice=mode`, 303);
   });
 
-  /** Sends a request to the bot and redirects back with a fixed notice or error. */
-  async function sendToBot(reply: FastifyReply, guildId: string, action: DashboardAction): Promise<FastifyReply> {
-    const outcome = await bot.send(action).catch(() => 'bot_unavailable' as const);
-    const target = OUTCOME_REDIRECT[outcome];
-    const query = 'notice' in target ? `notice=${target.notice}` : `error=${target.error}`;
-    return reply.redirect(`/servers/${guildId}?${query}`, 303);
-  }
+  app.post('/servers/:guildId/allowlist', async (request, reply) => {
+    const target = tenantRequest(request, reply);
+    if (!target) return reply;
+    await api.allowlistAdd(target.session, target.guildId, field(request.body, '_csrf'), field(request.body, 'domain'));
+    return reply.redirect(`/servers/${target.guildId}?notice=added`, 303);
+  });
 
-  /** Common checks for requests to the bot: logged in, manages this server, CSRF, rate limit. */
-  async function actionTenant(request: FastifyRequest, reply: FastifyReply) {
-    const tenant = await tenantFor(request, reply);
-    if (!tenant || !csrfOk(request, reply, tenant.session)) return null;
-    if (!limits.actions.take(tenant.session.userId)) {
-      void send(reply, messagePage('Slow down', 'Too many changes in a minute. Try again shortly.', tenant.session), 429);
-      return null;
-    }
-    return tenant;
-  }
+  app.post('/servers/:guildId/allowlist/remove', async (request, reply) => {
+    const target = tenantRequest(request, reply);
+    if (!target) return reply;
+    await api.allowlistRemove(target.session, target.guildId, field(request.body, '_csrf'), field(request.body, 'domain'));
+    return reply.redirect(`/servers/${target.guildId}?notice=removed`, 303);
+  });
+
+  /** "Check a link", like /equinox check in Discord. The API does the checking. */
+  app.post('/servers/:guildId/check', async (request, reply) => {
+    const target = tenantRequest(request, reply);
+    if (!target) return reply;
+    const { viewer, name, result, queued } = await api.checkLink(
+      target.session,
+      target.guildId,
+      field(request.body, '_csrf'),
+      field(request.body, 'url'),
+    );
+    return send(reply, checkResultPage({ viewer, guildId: target.guildId, name, result, queued }));
+  });
 
   /** Restore, false positive or confirm, like the buttons on the alert in Discord. */
   app.post('/servers/:guildId/detections/:detectionId/review', async (request, reply) => {
-    const tenant = await actionTenant(request, reply);
-    if (!tenant) return reply;
+    const target = tenantRequest(request, reply);
+    if (!target) return reply;
     const detectionId = field(request.params, 'detectionId');
-    const decision = field(request.body, 'decision') as (typeof REVIEW_DECISIONS)[number];
-    if (!UUID.test(detectionId) || !REVIEW_DECISIONS.includes(decision)) {
-      return reply.redirect(`/servers/${tenant.guild.id}?error=detection_missing`, 303);
-    }
-    return sendToBot(reply, tenant.guild.id, {
-      type: 'review',
-      guildId: tenant.guild.id,
-      actorId: tenant.session.userId,
-      detectionId,
-      decision,
-    });
+    if (!UUID.test(detectionId)) return reply.redirect(`/servers/${target.guildId}?error=detection_missing`, 303);
+    const csrf = field(request.body, '_csrf');
+    return botResult(reply, target.guildId, api.review(target.session, target.guildId, csrf, detectionId, field(request.body, 'decision')));
   });
 
-  /** Alert channel, mod role and quarantine role, like /equinox setup. The bot re-checks all of it. */
+  /** Alert channel, mod role and quarantine role, like /equinox setup. The API and the bot check it all. */
   app.post('/servers/:guildId/setup', async (request, reply) => {
-    const tenant = await actionTenant(request, reply);
-    if (!tenant) return reply;
-    const channel = field(request.body, 'alert_channel');
+    const target = tenantRequest(request, reply);
+    if (!target) return reply;
     const modRole = field(request.body, 'mod_role');
     const quarantineRole = field(request.body, 'quarantine_role');
-    if (!SNOWFLAKE.test(channel)) return reply.redirect(`/servers/${tenant.guild.id}?error=setup_channel`, 303);
-    if (modRole && !SNOWFLAKE.test(modRole)) return reply.redirect(`/servers/${tenant.guild.id}?error=setup_mod_role`, 303);
-    if (quarantineRole && !SNOWFLAKE.test(quarantineRole)) {
-      return reply.redirect(`/servers/${tenant.guild.id}?error=setup_quarantine_role`, 303);
-    }
-    return sendToBot(reply, tenant.guild.id, {
-      type: 'setup',
-      guildId: tenant.guild.id,
-      actorId: tenant.session.userId,
-      alertChannelId: channel,
-      modRoleId: modRole || null,
-      quarantineRoleId: quarantineRole || null,
-    });
+    return botResult(
+      reply,
+      target.guildId,
+      api.setup(target.session, target.guildId, field(request.body, '_csrf'), {
+        alertChannelId: field(request.body, 'alert_channel'),
+        modRoleId: modRole || null,
+        quarantineRoleId: quarantineRole || null,
+      }),
+    );
   });
 
   /** A harmless test alert, like /equinox test. */
   app.post('/servers/:guildId/test', async (request, reply) => {
-    const tenant = await actionTenant(request, reply);
-    if (!tenant) return reply;
-    return sendToBot(reply, tenant.guild.id, { type: 'test', guildId: tenant.guild.id, actorId: tenant.session.userId });
-  });
-
-  /**
-   * "Check a link", like /equinox check in Discord: local heuristics, this server's allowlist,
-   * the network blocklist and cached intel. Unknown links are queued for the intel worker.
-   * A POST with the CSRF token, so another site can't make an admin's browser trigger lookups.
-   */
-  app.post('/servers/:guildId/check', async (request, reply) => {
-    const tenant = await tenantFor(request, reply);
-    if (!tenant || !csrfOk(request, reply, tenant.session)) return reply;
-    const { session, guild, name } = tenant;
-    if (!limits.checks.take(session.userId)) {
-      return send(reply, messagePage('Slow down', 'You can check 10 links a minute. Try again shortly.', session), 429);
-    }
-    const input = field(request.body, 'url');
-    const finding = parseLinkInput(input);
-    if (!finding) return reply.redirect(`/servers/${guild.id}?error=url`, 303);
-
-    const candidates = domainCandidates(finding.normalized);
-    const [allowlisted, blocklisted, cached] = await Promise.all([
-      stores.allowlist.hasAny(guild.id, 'domain', candidates),
-      intel.isBlocklisted(candidates).catch(() => false),
-      intel.cached(finding.normalized.url).catch(() => null),
-    ]);
-    const result = checkLink(finding, { allowlisted, blocklisted, intel: cached });
-    let queued = false;
-    if (result.intelState === 'pending') {
-      queued = await intel
-        .requestLookup(result.url, finding.score)
-        .then(() => true)
-        .catch((err: unknown) => {
-          request.log.warn({ err: { message: err instanceof Error ? err.message : 'unknown' } }, 'could not queue intel lookup');
-          return false;
-        });
-    }
-    return send(reply, checkResultPage({ session, guildId: guild.id, name, result, queued }));
-  });
-
-  app.post('/servers/:guildId/allowlist', async (request, reply) => {
-    const tenant = await tenantFor(request, reply);
-    if (!tenant || !csrfOk(request, reply, tenant.session)) return reply;
-    const { session, guild } = tenant;
-    const domain = parseDomainInput(field(request.body, 'domain'));
-    if (!domain) return reply.redirect(`/servers/${guild.id}?error=domain`, 303);
-
-    await stores.allowlist.add({ guildId: guild.id, type: 'domain', value: domain, addedBy: session.userId });
-    await stores.audit.write({
-      guildId: guild.id,
-      actor: session.userId,
-      action: 'allowlist.add',
-      target: domain,
-      details: { via: 'dashboard' },
-    });
-    return reply.redirect(`/servers/${guild.id}?notice=added`, 303);
-  });
-
-  app.post('/servers/:guildId/allowlist/remove', async (request, reply) => {
-    const tenant = await tenantFor(request, reply);
-    if (!tenant || !csrfOk(request, reply, tenant.session)) return reply;
-    const { session, guild } = tenant;
-    const domain = parseDomainInput(field(request.body, 'domain'));
-    if (!domain || !(await stores.allowlist.remove(guild.id, 'domain', domain))) {
-      return reply.redirect(`/servers/${guild.id}?error=missing`, 303);
-    }
-
-    await stores.audit.write({
-      guildId: guild.id,
-      actor: session.userId,
-      action: 'allowlist.remove',
-      target: domain,
-      details: { via: 'dashboard' },
-    });
-    return reply.redirect(`/servers/${guild.id}?notice=removed`, 303);
+    const target = tenantRequest(request, reply);
+    if (!target) return reply;
+    return botResult(reply, target.guildId, api.test(target.session, target.guildId, field(request.body, '_csrf')));
   });
 
   return app;

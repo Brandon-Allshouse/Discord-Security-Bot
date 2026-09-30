@@ -7,15 +7,15 @@ const urlWithProtocol = (protocols: string[]) =>
     message: `protocol must be one of ${protocols.join(', ')}`,
   });
 
+/** 32+ random bytes as hex, from `openssl rand -hex 32` (in Git Bash on Windows). */
+const hexKey = (name: string) =>
+  z.string().regex(/^[0-9a-f]{64,}$/i, `${name} must be at least 64 hex characters (openssl rand -hex 32)`);
+
 /**
- * Shared by the bot and the dashboard to sign requests from the dashboard to the bot.
- * 32+ random bytes as hex, e.g. `openssl rand -hex 32`. Optional: without it, the dashboard's
- * review, setup and test buttons are off, and the bot ignores requests.
+ * Shared by the bot and the API to sign requests to the bot (review, setup, test alert).
+ * Optional: without it those dashboard buttons are off, and the bot ignores requests.
  */
-const signingKey = z
-  .string()
-  .regex(/^[0-9a-f]{64,}$/i, 'INTERNAL_SIGNING_KEY must be at least 64 hex characters (openssl rand -hex 32)')
-  .optional();
+const signingKey = hexKey('INTERNAL_SIGNING_KEY').optional();
 
 export const configSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -33,18 +33,46 @@ export const configSchema = z.object({
 
 export type Config = z.infer<typeof configSchema>;
 
-/** The dashboard is its own process. It never gets the bot token, only the OAuth client secret. */
+/** Public address of the dashboard. The OAuth redirect is this plus /auth/callback. */
+const dashboardUrl = urlWithProtocol(['http:', 'https:']).default('http://localhost:3000');
+
+/**
+ * The dashboard is the frontend: it renders pages and talks only to the API. It holds no
+ * database or Redis credentials, no Discord secrets and no bot key, so a compromised dashboard
+ * can't reach data directly.
+ */
 export const dashboardConfigSchema = z.object({
   NODE_ENV: configSchema.shape.NODE_ENV,
   LOG_LEVEL: configSchema.shape.LOG_LEVEL,
 
-  DISCORD_CLIENT_ID: snowflake,
-  DISCORD_CLIENT_SECRET: z.string().min(20, 'DISCORD_CLIENT_SECRET looks too short'),
-
-  /** Public address of the dashboard. The OAuth redirect is this plus /auth/callback. */
-  DASHBOARD_URL: urlWithProtocol(['http:', 'https:']).default('http://localhost:3000'),
+  DASHBOARD_URL: dashboardUrl,
   DASHBOARD_HOST: z.string().min(1).default('127.0.0.1'),
   DASHBOARD_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+
+  /** Where the API is, e.g. http://api:4000 inside Docker Compose. */
+  API_URL: urlWithProtocol(['http:', 'https:']).default('http://127.0.0.1:4000'),
+  /** Signs every request to the API. The same value as the API's. */
+  API_SIGNING_KEY: hexKey('API_SIGNING_KEY'),
+});
+
+export type DashboardConfig = z.infer<typeof dashboardConfigSchema>;
+
+/**
+ * The API is the backend for the dashboard: the only service the dashboard talks to, and the
+ * one that talks to the database, Redis and (through signed requests) the bot. It is not
+ * published outside the internal network.
+ */
+export const apiConfigSchema = z.object({
+  NODE_ENV: configSchema.shape.NODE_ENV,
+  LOG_LEVEL: configSchema.shape.LOG_LEVEL,
+
+  API_HOST: z.string().min(1).default('127.0.0.1'),
+  API_PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+  API_SIGNING_KEY: hexKey('API_SIGNING_KEY'),
+
+  DISCORD_CLIENT_ID: snowflake,
+  DISCORD_CLIENT_SECRET: z.string().min(20, 'DISCORD_CLIENT_SECRET looks too short'),
+  DASHBOARD_URL: dashboardUrl,
 
   DATABASE_URL: configSchema.shape.DATABASE_URL,
   REDIS_URL: configSchema.shape.REDIS_URL,
@@ -52,7 +80,7 @@ export const dashboardConfigSchema = z.object({
   INTERNAL_SIGNING_KEY: signingKey,
 });
 
-export type DashboardConfig = z.infer<typeof dashboardConfigSchema>;
+export type ApiConfig = z.infer<typeof apiConfigSchema>;
 
 /** Free VirusTotal API limits (spec §4). The public tier may never be configured above them. */
 export const VT_PUBLIC_LIMITS = { perMinute: 4, perDay: 500 } as const;
@@ -117,6 +145,18 @@ export function loadDashboardConfig(env: Env = process.env): DashboardConfig {
   return config;
 }
 
+export function loadApiConfig(env: Env = process.env): ApiConfig {
+  const config = parseEnv(apiConfigSchema, env);
+  if (config.NODE_ENV === 'production' && !config.DASHBOARD_URL.startsWith('https://')) {
+    throw new Error('Invalid configuration:\n  - DASHBOARD_URL: must use https in production');
+  }
+  if (config.INTERNAL_SIGNING_KEY && config.INTERNAL_SIGNING_KEY.toLowerCase() === config.API_SIGNING_KEY.toLowerCase()) {
+    // Separate keys: the dashboard holds API_SIGNING_KEY, and must never be able to sign bot requests.
+    throw new Error('Invalid configuration:\n  - API_SIGNING_KEY: must be different from INTERNAL_SIGNING_KEY');
+  }
+  return config;
+}
+
 export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
   const config = parseEnv(workerConfigSchema, env);
   if (config.VT_TIER === 'public') {
@@ -144,11 +184,13 @@ export const logRedactPaths = [
   'VT_API_KEY',
   'URLHAUS_AUTH_KEY',
   'INTERNAL_SIGNING_KEY',
+  'API_SIGNING_KEY',
   '*.DISCORD_TOKEN',
   '*.DISCORD_CLIENT_SECRET',
   '*.VT_API_KEY',
   '*.URLHAUS_AUTH_KEY',
   '*.INTERNAL_SIGNING_KEY',
+  '*.API_SIGNING_KEY',
   '*.DATABASE_URL',
   '*.REDIS_URL',
   'token',
@@ -163,6 +205,10 @@ export const logRedactPaths = [
   'headers.cookie',
   'headers["x-apikey"]',
   'headers["auth-key"]',
+  'headers["x-equinox-session"]',
+  'headers["x-equinox-signature"]',
+  'sessionId',
+  '*.sessionId',
   'access_token',
   '*.access_token',
 ];

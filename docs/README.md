@@ -6,6 +6,9 @@
 | [Link protection](link-protection.md) | Server admins and mods | How links are found and scored, the blocklist and allowlist, testing safely, false alarms |
 | [Threat intel](threat-intel.md) | Admins and operators | Outside sources (redirects, URLhaus, domain age, VirusTotal), escalations, limits, setup, troubleshooting |
 | [Dashboard](dashboard.md) | Server admins and operators | Logging in, everything on a server's page, how it's kept safe, setup, troubleshooting |
+| [Architecture](architecture.md) | Operators and security reviewers | How the parts talk (browser → dashboard → API → data), who holds which secret, network separation, request signing, what a compromise of each part would expose |
+| [Privacy and data](privacy.md) | Everyone | What Equinox reads, every table and Redis key it keeps, how long, and who else sees anything |
+| [Development](development.md) | Contributors | Running the parts, tests and coverage, database changes, and the checklist every change must meet |
 | [Security controls](security-controls.md) | Security reviewers | Every control, the NIST/OWASP requirement behind it, where it is in the code, and its test |
 
 Running the service itself (Docker, environment variables, development) is in the main [README](../README.md). Reporting a vulnerability: [SECURITY.md](../SECURITY.md).

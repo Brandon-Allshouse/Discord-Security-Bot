@@ -8,7 +8,7 @@ Think of it as [Sublime Security](https://sublime.security) or [Abnormal Securit
 
 Each server is its own tenant. Your detections, settings, allowlist and audit log belong to your server alone, and the database enforces that. The one thing servers share is indicators. When a scam domain gets confirmed in one server, every other server is protected from it within seconds.
 
-**Guides:** [getting started](docs/getting-started.md) (setup, modes, alerts) · [link protection](docs/link-protection.md) · [threat intel](docs/threat-intel.md) · [dashboard](docs/dashboard.md) · [all docs](docs/README.md)
+**Guides:** [getting started](docs/getting-started.md) (setup, modes, alerts) · [link protection](docs/link-protection.md) · [threat intel](docs/threat-intel.md) · [dashboard](docs/dashboard.md) · [architecture](docs/architecture.md) · [privacy](docs/privacy.md) · [development](docs/development.md) · [all docs](docs/README.md)
 
 ## How it fits together
 
@@ -16,7 +16,8 @@ Each server is its own tenant. Your detections, settings, allowlist and audit lo
 - **The detection engine** (`packages/core`) is plain TypeScript with no Discord in it, so it's easy to test. It holds the detectors, the verdict logic, and the policy table that decides what to do in each mode.
 - **Tenant data** (`packages/db`) lives in Postgres. Each server's settings, detections, allowlist and audit log are walled off with row-level security.
 - **The intel worker** (`apps/worker`) looks up links the sensor knows nothing about: it follows redirects safely, checks how old the domain is, checks the URLhaus malware feed, and asks VirusTotal within its free-tier limits. Answers are cached, and sent back to the sensor if they change a verdict.
-- **The dashboard** (`apps/dashboard`) is the web side of a tenant. Server admins log in with Discord and see their own server's detections, audit log, settings and allowlist.
+- **The dashboard** (`apps/dashboard`) is the web side of a tenant: the frontend. Server admins log in with Discord and see and manage their own server. It renders pages and holds no data or credentials of its own: it gets everything from the API.
+- **The API** (`apps/api`) is the backend for the dashboard, and the only thing the dashboard talks to. It handles login, sessions, access checks and every read and write, and it's the part that talks to the database, Redis and (through signed requests) the bot. How the parts talk and what each is trusted with: [docs/architecture.md](docs/architecture.md).
 - **The threat network** is the shared list of bad domains, URLs and file hashes. Today that's a Redis blocklist; M5 adds the scoring service that promotes indicators across servers. It never carries message content, and never says which server saw what.
 
 ### Tenants
@@ -84,7 +85,10 @@ The exact behavior lives in one place: the policy table in `packages/core/src/po
         answer cached in Redis  ◄───────┘
         Redis Pub/Sub: equinox:intel:resolved ──► shards re-check waiting messages
 
-        Planned (M5): a scoring service (apps/api) promotes indicators seen across
+        Browser ──► Dashboard (apps/dashboard) ──signed──► API (apps/api) ──► Postgres, Redis, bot
+        The dashboard only reaches the API; see docs/architecture.md.
+
+        Planned (M5): a scoring service promotes indicators seen across
         servers and pushes confirmed ones to every shard's cache.
 ```
 
@@ -101,17 +105,18 @@ TypeScript on Node 22 (strict mode) across the board, with:
 - Vitest and Testcontainers for tests, so integration tests run against real Postgres and Redis
 - pino for structured logs
 - pnpm workspaces and Turborepo for the monorepo
-- Fastify for the dashboard, which renders plain HTML on the server for now
+- Fastify for the dashboard (plain server-rendered HTML for now) and for the API behind it
 - Docker Compose for local development
 
-A separate API, Next.js for the dashboard redesign, and Prometheus (metrics) come in with the milestones that need them.
+Next.js for the dashboard redesign and Prometheus (metrics) come in with the milestones that need them.
 
 ## Repository layout
 
 ```
 apps/
   bot/         The sensor: Discord shards, detectors, slash commands, alert buttons
-  dashboard/   The web dashboard: Discord login, one page per tenant
+  api/         The backend for the dashboard: login, sessions, access checks, all data access
+  dashboard/   The web dashboard (frontend): pages only, talks to the API and nothing else
   worker/      The intel worker: redirect expansion, domain age, URLhaus, VirusTotal
 packages/
   core/        Types, policy table, link detection (no Discord code)
@@ -120,7 +125,7 @@ packages/
 docs/          User guides (getting started, link protection, threat intel, dashboard) and the security controls mapping
 ```
 
-`api/` will show up with M5.
+
 
 ## Getting started
 
@@ -133,7 +138,7 @@ You'll need Node 22, pnpm 10 and Docker. On Windows, also Git Bash (it comes wit
    cp .env.example .env
    ```
 
-   Fill in `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` (for the dashboard, from the **OAuth2** page), `DEV_GUILD_ID` (the ID of your test server) and `INTERNAL_SIGNING_KEY` (`openssl rand -hex 32`; lets the dashboard ask the bot to review, set up and test). `VT_API_KEY` is optional: without it, threat intel runs on everything but VirusTotal. See [VirusTotal](#virustotal). Replace both passwords with long random hex strings, e.g. from `openssl rand -hex 32`. Hex matters here because the passwords end up inside connection URLs.
+   Fill in `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` (for dashboard logins, from the **OAuth2** page), `DEV_GUILD_ID` (the ID of your test server) `API_SIGNING_KEY` and `INTERNAL_SIGNING_KEY` (two different values from `openssl rand -hex 32`: the first signs the dashboard's requests to the API, the second the API's requests to the bot). `VT_API_KEY` is optional: without it, threat intel runs on everything but VirusTotal. See [VirusTotal](#virustotal). Replace both passwords with long random hex strings, e.g. from `openssl rand -hex 32`. Hex matters here because the passwords end up inside connection URLs.
 
    Generate each secret in **Git Bash** (on Windows) or any terminal on macOS or Linux. Run the command once per secret, so each gets its own value:
 
@@ -162,10 +167,13 @@ When the bot starts, it runs database migrations, loads the seed blocklist, and 
 |---|---|
 | `DISCORD_TOKEN`, `DISCORD_CLIENT_ID` | Your Discord application |
 | `DEV_GUILD_ID` | Test server where commands register during development. Not allowed in production. |
-| `DISCORD_CLIENT_SECRET` | Dashboard only: lets people log in with Discord. The bot never uses it. |
+| `DISCORD_CLIENT_SECRET` | API only: lets people log in to the dashboard with Discord. The bot and the dashboard never see it. |
+| `API_SIGNING_KEY` | Dashboard and API, same value, required. Signs every request from the dashboard to the API. Must differ from `INTERNAL_SIGNING_KEY`. |
+| `API_URL` | Dashboard only: where the API is. Docker Compose sets it to `http://api:4000`. |
+| `API_HOST`, `API_PORT` | Where the API listens. Defaults to `127.0.0.1:4000`; never publish it outside your internal network. |
 | `DASHBOARD_URL` | Public address of the dashboard. Defaults to `http://localhost:3000`; must be `https` in production. |
 | `DASHBOARD_HOST`, `DASHBOARD_PORT` | Where the dashboard listens. Defaults to `127.0.0.1:3000`. |
-| `INTERNAL_SIGNING_KEY` | Bot and dashboard, same value. Signs the dashboard's requests to the bot (review, setup, test alert). At least 64 hex characters. Without it those dashboard buttons are off. |
+| `INTERNAL_SIGNING_KEY` | Bot and API, same value. Signs the API's requests to the bot (review, setup, test alert). At least 64 hex characters. Without it those dashboard buttons are off. |
 | `POSTGRES_PASSWORD`, `REDIS_PASSWORD` | Database passwords for Docker Compose |
 | `DATABASE_URL`, `REDIS_URL` | Connection strings when you run the bot outside Docker |
 | `NODE_ENV`, `LOG_LEVEL` | Environment and how chatty the logs are |
@@ -183,6 +191,7 @@ pnpm test         # unit and integration tests (integration tests need Docker)
 pnpm lint
 pnpm typecheck
 pnpm audit:deps   # check dependencies for known vulnerabilities
+pnpm coverage     # test coverage for every package
 ```
 
 ### Testing in a live server
@@ -223,12 +232,12 @@ Discord hides all of these from members without **Manage Server** unless you cha
 
 The dashboard is each server's web tenant. It's deliberately plain for now: server-rendered pages, no JavaScript, and a redesign planned for M9.
 
-To turn it on, open your application in the Discord developer portal, go to **OAuth2**, copy the client secret into `DISCORD_CLIENT_SECRET`, and add `http://localhost:3000/auth/callback` under **Redirects**. Click **Save Changes** afterwards, or Discord answers the login with "Invalid OAuth2 redirect_uri". `docker compose up --build` then serves it at <http://localhost:3000>. Use that address and not `127.0.0.1:3000`: login cookies belong to one host name, so a login started anywhere else is moved to `DASHBOARD_URL` first. To run it outside Docker, use `pnpm --filter @equinox/dashboard dev`.
+To turn it on, open your application in the Discord developer portal, go to **OAuth2**, copy the client secret into `DISCORD_CLIENT_SECRET`, and add `http://localhost:3000/auth/callback` under **Redirects**. Click **Save Changes** afterwards, or Discord answers the login with "Invalid OAuth2 redirect_uri". `docker compose up --build` then serves it at <http://localhost:3000>. Use that address and not `127.0.0.1:3000`: login cookies belong to one host name, so a login started anywhere else is moved to `DASHBOARD_URL` first. To run it outside Docker, start the API and the dashboard: `pnpm --filter @equinox/api dev` and `pnpm --filter @equinox/dashboard dev` (with `API_URL=http://127.0.0.1:4000`).
 
 - **Who can log in:** anyone with a Discord account, but you only see servers where you have Manage Server (or are the owner or an administrator) and where the bot is installed. That's the same "Admin" as in the commands table. People with only the mod role use the Discord alert buttons.
 - **What you can do:** everything the slash commands and alert buttons do. Review detections (Restore, False positive, Confirm; the Discord alert is updated too), set the alert channel and roles, change the mode, send a test alert, see missing permissions, manage the allowlist, check links, see whether threat intel is working, and read the audit log. Changes land in the same audit log, marked `via: dashboard`.
-- **How it reaches Discord:** the dashboard never gets the bot token. It sends signed requests to the bot (`INTERNAL_SIGNING_KEY`), and the bot checks and carries them out.
-- **Sessions** last an hour and live in Redis. Equinox asks Discord only for your identity and server list, and gives the access token back as soon as it has read them.
+- **How it's built:** the dashboard only renders pages. Everything else happens in the API, which it reaches through signed requests; the API reaches the bot the same way. The dashboard has no database, Redis or Discord credentials, and on Docker's network it can't reach anything but the API. See [docs/architecture.md](docs/architecture.md).
+- **Sessions** last an hour and are kept by the API in Redis. Equinox asks Discord only for your identity and server list, and gives the access token back as soon as it has read them.
 
 The full guide, including troubleshooting, is [docs/dashboard.md](docs/dashboard.md).
 
@@ -271,7 +280,7 @@ Further out: a paid tier (which first needs a licensed intel source), a public t
 - Cached intel answers expire after 30 days if malicious and 24 hours otherwise, and a job deletes them every hour.
 - Anyone will be able to see what's stored about them, and ask for it to be deleted, with `/equinox data`.
 
-The full privacy policy will go in `docs/privacy.md`.
+Every table, Redis key and outside service, with how long data is kept: [docs/privacy.md](docs/privacy.md).
 
 ## Threat intel
 
@@ -306,4 +315,4 @@ We build against NIST SP 800-53, NIST SP 800-218 (SSDF), OWASP ASVS 5.0 and the 
 
 ## Contributing
 
-We build one milestone at a time, in roadmap order. Detection logic goes in `packages/core` and has to be testable without Discord. New detectors go through the same Signal → Verdict → Action → Audit pipeline as everything else, and every change comes with tests.
+We build one milestone at a time, in roadmap order. Detection logic goes in `packages/core` and has to be testable without Discord. New detectors go through the same Signal → Verdict → Action → Audit pipeline as everything else, and every change comes with tests. [docs/development.md](docs/development.md) has the setup, the test commands, and the checklist a change must meet before it's done.

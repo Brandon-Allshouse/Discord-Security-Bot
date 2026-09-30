@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig, loadDashboardConfig, loadWorkerConfig } from './index.js';
+import { loadApiConfig, loadConfig, loadDashboardConfig, loadWorkerConfig } from './index.js';
 
 const valid = {
   DISCORD_TOKEN: 'x'.repeat(70),
@@ -45,25 +45,43 @@ describe('loadConfig', () => {
   });
 });
 
-describe('loadDashboardConfig', () => {
-  const dashboard = {
-    DISCORD_CLIENT_ID: valid.DISCORD_CLIENT_ID,
-    DISCORD_CLIENT_SECRET: 's'.repeat(32),
-    DATABASE_URL: valid.DATABASE_URL,
-    REDIS_URL: valid.REDIS_URL,
-  };
+const API_KEY = 'cd'.repeat(32);
+const BOT_KEY = 'ab'.repeat(32);
 
-  it('defaults to a local address and does not need the bot token', () => {
-    const config = loadDashboardConfig(dashboard);
-    expect(config).toMatchObject({ DASHBOARD_URL: 'http://localhost:3000', DASHBOARD_HOST: '127.0.0.1', DASHBOARD_PORT: 3000 });
+describe('loadDashboardConfig (the frontend)', () => {
+  const dashboard = { API_SIGNING_KEY: API_KEY };
+
+  it('needs only the API address and its signing key, with local defaults', () => {
+    expect(loadDashboardConfig(dashboard)).toMatchObject({
+      DASHBOARD_URL: 'http://localhost:3000',
+      DASHBOARD_HOST: '127.0.0.1',
+      DASHBOARD_PORT: 3000,
+      API_URL: 'http://127.0.0.1:4000',
+    });
   });
 
-  it('rejects a missing client secret without echoing values', () => {
-    expect(() => loadDashboardConfig({ ...dashboard, DISCORD_CLIENT_SECRET: 'tiny-value' })).toThrow(/DISCORD_CLIENT_SECRET/);
+  it('holds no database, Redis or Discord secrets and no bot key, even if they are in the environment', () => {
+    const config = loadDashboardConfig({
+      ...dashboard,
+      DATABASE_URL: valid.DATABASE_URL,
+      REDIS_URL: valid.REDIS_URL,
+      DISCORD_TOKEN: valid.DISCORD_TOKEN,
+      DISCORD_CLIENT_SECRET: 's'.repeat(32),
+      INTERNAL_SIGNING_KEY: BOT_KEY,
+    });
+    for (const secret of ['DATABASE_URL', 'REDIS_URL', 'DISCORD_TOKEN', 'DISCORD_CLIENT_SECRET', 'INTERNAL_SIGNING_KEY']) {
+      expect(config).not.toHaveProperty(secret);
+    }
+  });
+
+  it('refuses to start without a proper API signing key, without echoing it', () => {
+    expect(() => loadDashboardConfig({})).toThrow(/API_SIGNING_KEY/);
     try {
-      loadDashboardConfig({ ...dashboard, DISCORD_CLIENT_SECRET: 'tiny-value' });
+      loadDashboardConfig({ API_SIGNING_KEY: 'short-key-value' });
+      expect.unreachable();
     } catch (error) {
-      expect(String(error)).not.toContain('tiny-value');
+      expect(String(error)).toMatch(/API_SIGNING_KEY/);
+      expect(String(error)).not.toContain('short-key-value');
     }
   });
 
@@ -74,30 +92,61 @@ describe('loadDashboardConfig', () => {
     );
   });
 
-  it('rejects a bad port', () => {
+  it('rejects a bad port or API address', () => {
     expect(() => loadDashboardConfig({ ...dashboard, DASHBOARD_PORT: '99999' })).toThrow(/DASHBOARD_PORT/);
+    expect(() => loadDashboardConfig({ ...dashboard, API_URL: 'file:///etc/passwd' })).toThrow(/API_URL/);
+  });
+});
+
+describe('loadApiConfig (the backend)', () => {
+  const api = {
+    API_SIGNING_KEY: API_KEY,
+    DISCORD_CLIENT_ID: valid.DISCORD_CLIENT_ID,
+    DISCORD_CLIENT_SECRET: 's'.repeat(32),
+    DATABASE_URL: valid.DATABASE_URL,
+    REDIS_URL: valid.REDIS_URL,
+  };
+
+  it('holds the data and Discord login credentials, but never the bot token', () => {
+    const config = loadApiConfig({ ...api, DISCORD_TOKEN: valid.DISCORD_TOKEN });
+    expect(config).toMatchObject({ API_HOST: '127.0.0.1', API_PORT: 4000, DASHBOARD_URL: 'http://localhost:3000' });
+    expect(config).not.toHaveProperty('DISCORD_TOKEN');
+    expect(config.INTERNAL_SIGNING_KEY).toBeUndefined();
+  });
+
+  it('rejects a short client secret or signing key without echoing them', () => {
+    for (const [name, value] of [['DISCORD_CLIENT_SECRET', 'tiny-value'], ['API_SIGNING_KEY', 'short-key-value']] as const) {
+      try {
+        loadApiConfig({ ...api, [name]: value });
+        expect.unreachable();
+      } catch (error) {
+        expect(String(error)).toMatch(new RegExp(name));
+        expect(String(error)).not.toContain(value);
+      }
+    }
+  });
+
+  it('refuses the same key for signing API and bot requests', () => {
+    expect(() => loadApiConfig({ ...api, INTERNAL_SIGNING_KEY: API_KEY })).toThrow(/must be different/);
+    expect(() => loadApiConfig({ ...api, INTERNAL_SIGNING_KEY: API_KEY.toUpperCase() })).toThrow(/must be different/);
+    expect(loadApiConfig({ ...api, INTERNAL_SIGNING_KEY: BOT_KEY }).INTERNAL_SIGNING_KEY).toBe(BOT_KEY);
+  });
+
+  it('requires an https dashboard address in production', () => {
+    expect(() => loadApiConfig({ ...api, NODE_ENV: 'production' })).toThrow(/DASHBOARD_URL/);
   });
 });
 
 describe('INTERNAL_SIGNING_KEY', () => {
-  const dashboard = {
-    DISCORD_CLIENT_ID: '123456789012345678',
-    DISCORD_CLIENT_SECRET: 's'.repeat(32),
-    DATABASE_URL: 'postgres://u:p@localhost:5432/db',
-    REDIS_URL: 'redis://:p@localhost:6379',
-  };
-
-  it('is optional for both the bot and the dashboard', () => {
+  it('is optional for the bot', () => {
     expect(loadConfig(valid).INTERNAL_SIGNING_KEY).toBeUndefined();
-    expect(loadDashboardConfig(dashboard).INTERNAL_SIGNING_KEY).toBeUndefined();
   });
 
   it('must be long, random-looking hex, and is never echoed back', () => {
-    const key = 'ab'.repeat(32);
-    expect(loadConfig({ ...valid, INTERNAL_SIGNING_KEY: key }).INTERNAL_SIGNING_KEY).toBe(key);
+    expect(loadConfig({ ...valid, INTERNAL_SIGNING_KEY: BOT_KEY }).INTERNAL_SIGNING_KEY).toBe(BOT_KEY);
     for (const bad of ['short', 'z'.repeat(64), 'ab'.repeat(31)]) {
       try {
-        loadDashboardConfig({ ...dashboard, INTERNAL_SIGNING_KEY: bad });
+        loadConfig({ ...valid, INTERNAL_SIGNING_KEY: bad });
         expect.unreachable();
       } catch (error) {
         expect(String(error)).toMatch(/INTERNAL_SIGNING_KEY/);

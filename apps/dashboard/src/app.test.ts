@@ -42,7 +42,7 @@ describe('login', () => {
     const res = await t.app.inject({ method: 'GET', url: '/auth/login', headers: HOST });
     const cookie = res.cookies.find((c) => c.name === 'eq_oauth_state');
     expect(res.statusCode).toBe(302);
-    expect(res.headers.location).toBe(`https://discord.test/authorize?state=${cookie?.value}`);
+    expect(res.headers.location).toBe(`https://discord.com/oauth2/authorize?state=${cookie?.value}`);
     expect(cookie).toMatchObject({ httpOnly: true, sameSite: 'Lax', path: '/' });
   });
 
@@ -54,7 +54,7 @@ describe('login', () => {
     expect(res.cookies).toHaveLength(0);
 
     const again = await t.app.inject({ method: 'GET', url: '/auth/login?moved=1', headers: other });
-    expect(again.headers.location).toMatch(/^https:\/\/discord\.test\//);
+    expect(again.headers.location).toMatch(/^https:\/\/discord\.com\/oauth2\/authorize\?/);
   });
 
   it('creates a session and sets an HttpOnly cookie', async () => {

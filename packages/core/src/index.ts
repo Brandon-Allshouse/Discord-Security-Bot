@@ -11,3 +11,4 @@ export * from './errors.js';
 export * from './links/index.js';
 export * from './intel/index.js';
 export * from './dashboard-contract.js';
+export * from './api-contract.js';

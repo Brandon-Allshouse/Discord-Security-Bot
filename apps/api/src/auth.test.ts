@@ -167,3 +167,18 @@ describe('RedisSessionStore', () => {
     expect(await store.get(id)).toBeNull();
   });
 });
+
+describe('canManage, edge cases', () => {
+  it.each([
+    [{ owner: true, permissions: '0' }, true],
+    [{ permissions: '8' }, true],
+    [{ permissions: '32' }, true],
+    [{ permissions: String(0x20 | 0x800) }, true],
+    [{ owner: false, permissions: '2048' }, false],
+    [{ permissions: '0' }, false],
+    // Bits above 2^53 must not be lost to floating point.
+    [{ permissions: '562949953421312' }, false],
+  ])('%j -> %s', (guild, expected) => {
+    expect(canManage(guild)).toBe(expected);
+  });
+});

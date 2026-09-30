@@ -19,3 +19,8 @@ ignoredBuiltDependencies:
 # Don't install anything published in the last 3 days. Hijacked releases usually
 # get caught and pulled within that window.
 minimumReleaseAge: 4320
+
+# drizzle-kit (dev only) pulls an old esbuild through @esbuild-kit with a dev-server flaw
+# (GHSA-67mh-4wv8-2f99). Force the patched release; drizzle-kit generate still works with it.
+overrides:
+  '@esbuild-kit/core-utils>esbuild': 0.25.12

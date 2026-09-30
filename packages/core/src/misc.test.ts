@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { BRAND, slash } from './brand.js';
 import { defang, truncate } from './display.js';
 import { safeErrorMessage } from './errors.js';
 import { parseDomainInput } from './links/normalize.js';
@@ -25,6 +26,14 @@ describe('RateLimiter', () => {
     const hits = (limiter as unknown as { hits: Map<string, unknown> }).hits;
     expect(hits.size).toBe(1);
     expect(limiter.take('old-0')).toBe(true);
+  });
+});
+
+describe('brand', () => {
+  it('writes slash commands the way users type them, and keeps the test domain unresolvable', () => {
+    expect(slash('setup')).toBe(`/${BRAND.command} setup`);
+    expect(BRAND.command).toMatch(/^[a-z0-9_-]{1,32}$/);
+    expect(BRAND.testDomain.endsWith('.invalid')).toBe(true);
   });
 });
 

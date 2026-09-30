@@ -4,14 +4,16 @@ import {
   GUILD_MODES,
   slash,
   truncate,
-  type Detection,
-  type GuildSettings,
+  type GuildPage,
   type GuildSnapshot,
   type IntelStatus,
   type LinkCheck,
+  type Viewer,
 } from '@equinox/core';
 import { html, type Html } from './html.js';
-import type { Session } from './sessions.js';
+
+/** A detection as the API sends it. */
+type DetectionRow = GuildPage['detections'][number];
 
 /*
  * Plain server-rendered pages. This is the first, deliberately bare version of the
@@ -45,7 +47,7 @@ ul.reasons { margin: 0; padding-left: 18px; }
 input.wide { width: min(100%, 520px); }
 `;
 
-function layout(title: string, body: Html, session?: Session): Html {
+function layout(title: string, body: Html, viewer?: Viewer): Html {
   return html`<!doctype html>
 <html lang="en">
 <head>
@@ -58,10 +60,10 @@ function layout(title: string, body: Html, session?: Session): Html {
 <header>
 <a href="/">${BRAND.name}</a>
 ${
-  session &&
+  viewer &&
   html`<form class="inline" method="post" action="/auth/logout">
-<input type="hidden" name="_csrf" value="${session.csrf}">
-<span class="muted">${session.username}</span>
+<input type="hidden" name="_csrf" value="${viewer.csrf}">
+<span class="muted">${viewer.username}</span>
 <button type="submit">Log out</button>
 </form>`
 }
@@ -83,25 +85,25 @@ export function landingPage(): Html {
   );
 }
 
-export function messagePage(title: string, message: string, session?: Session): Html {
-  return layout(title, html`<h1>${title}</h1><p>${message}</p><p><a href="/">Back</a></p>`, session);
+export function messagePage(title: string, message: string, viewer?: Viewer): Html {
+  return layout(title, html`<h1>${title}</h1><p>${message}</p><p><a href="/">Back</a></p>`, viewer);
 }
 
-export function serversPage(session: Session, tenants: readonly { id: string; name: string }[]): Html {
+export function serversPage(viewer: Viewer, tenants: readonly { id: string; name: string }[]): Html {
   const body = tenants.length
     ? html`<table>
 <tr><th>Server</th><th>ID</th></tr>
 ${tenants.map((t) => html`<tr><td><a href="/servers/${t.id}">${t.name}</a></td><td><code>${t.id}</code></td></tr>`)}
 </table>`
     : html`<p>None of the servers you manage have ${BRAND.name} installed yet. Add the bot to a server where you have Manage Server, then log in again.</p>`;
-  return layout('Your servers', html`<h1>Your servers</h1>${body}`, session);
+  return layout('Your servers', html`<h1>Your servers</h1>${body}`, viewer);
 }
 
 function when(date: Date): string {
   return `${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
-const STATUS_LABEL: Record<Detection['status'], string> = {
+const STATUS_LABEL: Record<DetectionRow['status'], string> = {
   open: 'Open',
   confirmed: 'Confirmed',
   false_positive: 'False positive',
@@ -130,16 +132,16 @@ export const ERRORS = {
   test_failed: 'The test signal didn’t go through. Check the bot’s logs.',
   bot_unavailable: 'The bot isn’t reachable right now, so nothing was changed. Try again in a minute.',
   bot_timeout: 'The bot didn’t answer in time, so nothing was changed. Try again in a minute.',
-  bot_rejected: 'The bot refused the request. Check that INTERNAL_SIGNING_KEY is the same for the bot and the dashboard.',
-  bot_off: 'This needs INTERNAL_SIGNING_KEY to be set for the bot and the dashboard.',
+  bot_rejected: 'The bot refused the request. Check that INTERNAL_SIGNING_KEY is the same for the bot and the API.',
+  bot_off: 'This needs INTERNAL_SIGNING_KEY to be set for the bot and the API.',
 } as const;
 
 export interface TenantView {
-  session: Session;
+  viewer: Viewer;
   name: string;
-  guild: GuildSettings;
+  guild: GuildPage['guild'];
   openCount: number;
-  detections: readonly Detection[];
+  detections: readonly DetectionRow[];
   allowlist: readonly { value: string; addedBy: string; createdAt: Date }[];
   audit: readonly { actor: string; action: string; target: string | null; createdAt: Date }[];
   /** The intel worker's heartbeat; null when it isn't running (or can't be read). */
@@ -153,9 +155,9 @@ export interface TenantView {
 }
 
 export function tenantPage(view: TenantView): Html {
-  const { session, guild } = view;
+  const { viewer, guild } = view;
   const base = `/servers/${guild.id}`;
-  const csrf = html`<input type="hidden" name="_csrf" value="${session.csrf}">`;
+  const csrf = html`<input type="hidden" name="_csrf" value="${viewer.csrf}">`;
 
   const { snapshot, botEnabled } = view;
   const channelName = (id: string | null) => {
@@ -237,7 +239,7 @@ ${health}
 </table>
 ${setupForm}`;
 
-  const reviewButtons = (d: Detection) => {
+  const reviewButtons = (d: DetectionRow) => {
     if (!botEnabled || d.status === 'restored' || d.status === 'false_positive') return null;
     const button = (decision: string, label: string) =>
       html`<form class="inline" method="post" action="${base}/detections/${d.id}/review">${csrf}<input type="hidden" name="decision" value="${decision}"><button type="submit">${label}</button></form>`;
@@ -324,14 +326,14 @@ ${view.audit.map(
 ${view.notice && html`<p class="notice">${NOTICES[view.notice]}</p>`}
 ${view.error && html`<p class="notice error">${ERRORS[view.error]}</p>`}
 ${settings}${detections}${intel}${allowlist}${audit}`,
-    session,
+    viewer,
   );
 }
 
 /** Sources that are the sensor's own checks rather than outside threat intel. */
 const LOCAL_SOURCES = new Set(['heuristic', 'allowlist', 'blocklist']);
 
-function whyCell(d: Detection): Html {
+function whyCell(d: DetectionRow): Html {
   const intel = d.verdict.sources.filter((s) => !LOCAL_SOURCES.has(s));
   return html`${
     d.verdict.reasons.length > 0 &&
@@ -367,7 +369,7 @@ const CHECK_LEVEL: Record<LinkCheck['level'], string> = {
 };
 
 export interface CheckResultView {
-  session: Session;
+  viewer: Viewer;
   guildId: string;
   name: string;
   result: LinkCheck;
@@ -376,7 +378,7 @@ export interface CheckResultView {
 }
 
 export function checkResultPage(view: CheckResultView): Html {
-  const { result, session } = view;
+  const { result, viewer } = view;
   const base = `/servers/${view.guildId}`;
   const level = result.allowlisted
     ? 'Clean (allowlisted in this server)'
@@ -406,10 +408,10 @@ ${
   html`<ul class="reasons">${result.reasons.map((r) => html`<li>${r}</li>`)}</ul>`
 }
 ${intelLine}
-<form method="post" action="${base}/check"><input type="hidden" name="_csrf" value="${session.csrf}">
+<form method="post" action="${base}/check"><input type="hidden" name="_csrf" value="${viewer.csrf}">
 <input type="hidden" name="url" value="${result.url}">
 <button type="submit">Check again</button>
 </form>`,
-    session,
+    viewer,
   );
 }

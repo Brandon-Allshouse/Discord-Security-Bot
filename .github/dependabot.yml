@@ -53,6 +53,7 @@ updates:
 
   - package-ecosystem: docker
     directories:
+      - /apps/api
       - /apps/bot
       - /apps/dashboard
       - /apps/worker

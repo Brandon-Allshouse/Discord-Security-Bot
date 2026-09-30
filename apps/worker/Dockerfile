@@ -7,6 +7,7 @@ WORKDIR /repo
 
 # Manifests first so dependency install is cached separately from source changes.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc turbo.json tsconfig.base.json ./
+COPY apps/api/package.json apps/api/
 COPY apps/bot/package.json apps/bot/
 COPY apps/dashboard/package.json apps/dashboard/
 COPY apps/worker/package.json apps/worker/
