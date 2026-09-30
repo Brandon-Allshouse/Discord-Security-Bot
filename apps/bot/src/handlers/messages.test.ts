@@ -54,10 +54,51 @@ describe('scanMessage (link sensor)', () => {
     expect(t.fake.executed.map((e) => e.action)).toEqual(['alert']);
   });
 
-  it('does nothing for legitimate links', async () => {
+  it('does nothing for legitimate links, and never sends well-known sites for lookups', async () => {
     const t = createFakeContext();
     await scanMessage(fakeMessage('see https://github.com/discordjs/discord.js'), t.ctx);
     expect(t.fake.detections.size).toBe(0);
+    expect(t.intelRequests).toHaveLength(0);
+  });
+
+  it('asks the intel worker about unknown links, with the message to come back to', async () => {
+    const t = createFakeContext();
+    await scanMessage(fakeMessage('look https://some-unknown-site.test/page'), t.ctx);
+    expect(t.fake.detections.size).toBe(0);
+    expect(t.intelRequests).toEqual([
+      {
+        subject: 'https://some-unknown-site.test/page',
+        waiter: {
+          guildId: TENANT,
+          userId: '200000000000000001',
+          channelId: '300000000000000001',
+          messageId: '400000000000000001',
+          heuristicScore: 0,
+          reasons: [],
+        },
+      },
+    ]);
+  });
+
+  it('uses cached intel right away and skips the lookup', async () => {
+    const t = createFakeContext();
+    t.fake.intel.set('https://some-unknown-site.test/page', {
+      level: 'malicious',
+      score: 0.95,
+      sources: ['urlhaus'],
+      reasons: ['Listed by URLhaus as a malware link'],
+    });
+    await scanMessage(fakeMessage('look https://some-unknown-site.test/page'), t.ctx);
+    expect([...t.fake.detections.values()][0]?.verdict).toMatchObject({ level: 'malicious', sources: ['heuristic', 'urlhaus'] });
+    expect(t.intelRequests).toHaveLength(0);
+  });
+
+  it('still scans when the intel queue is down', async () => {
+    const t = createFakeContext();
+    t.intel.request.mockRejectedValueOnce(new Error('redis down'));
+    await scanMessage(fakeMessage('free nitro https://dlscord.gift/abc'), t.ctx);
+    expect(t.fake.detections.size).toBe(1);
+    expect(t.logger.warn).toHaveBeenCalledWith(expect.anything(), 'could not queue intel lookup');
   });
 
   it('creates one detection per message even with several bad links', async () => {

@@ -60,6 +60,21 @@ export function createFakeContext(guild: GuildSettings = makeGuild({ id: TENANT,
     isDomainBlocklisted: vi.fn((candidates: string[]) => Promise.resolve(candidates.some((c) => fake.blocklist.has(c)))),
   };
   const logger = silentLogger();
+  const intelRequests: { subject: string; waiter?: unknown; heuristicScore?: number }[] = [];
+  const intel = {
+    request: vi.fn((subject: string, waiter: unknown) => {
+      intelRequests.push({ subject, waiter });
+      return Promise.resolve(true);
+    }),
+    lookup: vi.fn((subject: string, heuristicScore: number) => {
+      intelRequests.push({ subject, heuristicScore });
+      return Promise.resolve();
+    }),
+  };
+  const intelCache = {
+    summaryFor: fake.deps.intel!.summaryFor,
+    forUrl: vi.fn((url: string) => Promise.resolve(fake.intel.get(url) ?? null)),
+  };
   const ctx = {
     client: { user: { id: '999999999999999999' } },
     logger,
@@ -67,10 +82,12 @@ export function createFakeContext(guild: GuildSettings = makeGuild({ id: TENANT,
     stores,
     guildCache,
     indicators,
+    intel,
+    intelCache,
     deps: { ...fake.deps, guilds: guildCache },
     limits: { interactions: new RateLimiter(10, 60_000) },
   } as unknown as BotContext;
-  return { ctx, fake, stores, logger, allowlist, guildCache };
+  return { ctx, fake, stores, logger, allowlist, guildCache, intel, intelRequests };
 }
 
 interface FakeInteractionOptions {

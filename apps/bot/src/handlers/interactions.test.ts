@@ -3,7 +3,7 @@ import { processSignal } from '@equinox/core';
 import { makeGuild, makeSignal } from '@equinox/core/testing';
 import { reviewCustomId } from '../alerts.js';
 import { createFakeContext, fakeButton, fakeCommand, MOD_ROLE, OTHER_TENANT, replyText, TENANT } from '../test-helpers.js';
-import { handleInteraction } from './interactions.js';
+import { formatLinkCheck, handleInteraction } from './interactions.js';
 
 const ADMIN = { manageGuild: true };
 const MOD = { roleIds: [MOD_ROLE] };
@@ -76,6 +76,36 @@ describe('slash commands', () => {
     expect(text).toMatch(/Malicious/);
     expect(text).toContain('hxxps://dlscord[.]com');
     expect(text).not.toContain('https://dlscord.com');
+  });
+
+  it('/equinox check adds cached threat intel, or queues a lookup when there is none', async () => {
+    const t = createFakeContext();
+    const first = fakeCommand({ sub: 'check' }, { url: 'https://unknown-site.test/page' }, MOD);
+    await handleInteraction(first.interaction, t.ctx);
+    expect(replyText(first.replies)).toMatch(/No known issues/);
+    expect(replyText(first.replies)).toMatch(/not checked yet/);
+    expect(t.intelRequests).toEqual([{ subject: 'https://unknown-site.test/page', heuristicScore: 0 }]);
+
+    t.fake.intel.set('https://unknown-site.test/page', {
+      level: 'malicious',
+      score: 0.95,
+      sources: ['urlhaus'],
+      reasons: ['Listed by URLhaus as a malware link'],
+    });
+    const second = fakeCommand({ sub: 'check' }, { url: 'https://unknown-site.test/page' }, MOD);
+    await handleInteraction(second.interaction, t.ctx);
+    expect(replyText(second.replies)).toMatch(/Malicious/);
+    expect(replyText(second.replies)).toMatch(/Listed by URLhaus/);
+    expect(replyText(second.replies)).toMatch(/Threat intel: urlhaus/);
+    expect(t.intelRequests).toHaveLength(1);
+  });
+
+  it('/equinox check never looks up well-known safe sites', async () => {
+    const t = createFakeContext();
+    const { interaction, replies } = fakeCommand({ sub: 'check' }, { url: 'https://github.com/x' }, MOD);
+    await handleInteraction(interaction, t.ctx);
+    expect(replyText(replies)).not.toMatch(/Threat intel/);
+    expect(t.intelRequests).toHaveLength(0);
   });
 
   it('/equinox check honors the tenant allowlist', async () => {
@@ -218,5 +248,32 @@ describe('abuse and failure handling', () => {
     expect(text).toMatch(/Something went wrong \(ref/);
     expect(text).not.toContain('hunter2');
     expect(t.logger.error).toHaveBeenCalled();
+  });
+});
+
+describe('formatLinkCheck', () => {
+  const base = {
+    url: 'https://a.test/x',
+    level: 'clean' as const,
+    score: 0,
+    reasons: [],
+    allowlisted: false,
+    blocklisted: false,
+    knownSafe: false,
+    intel: null,
+  };
+
+  it('defangs the link and neutralizes backticks', () => {
+    const text = formatLinkCheck({ ...base, url: 'https://a.test/`x`', intelState: 'not_needed' });
+    expect(text).toContain('hxxps://a[.]test/ˋxˋ');
+    expect(text).not.toContain('https://a.test');
+  });
+
+  it('describes each intel state', () => {
+    expect(formatLinkCheck({ ...base, intelState: 'pending' })).toMatch(/not checked yet/);
+    expect(formatLinkCheck({ ...base, intelState: 'checked', intel: { level: 'clean', score: 0, sources: [], reasons: [] } })).toMatch(
+      /no source knows of problems/,
+    );
+    expect(formatLinkCheck({ ...base, intelState: 'not_needed', knownSafe: true })).not.toMatch(/Threat intel/);
   });
 });

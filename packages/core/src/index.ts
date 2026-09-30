@@ -9,3 +9,5 @@ export * from './rate-limit.js';
 export * from './display.js';
 export * from './errors.js';
 export * from './links/index.js';
+export * from './intel/index.js';
+export * from './dashboard-contract.js';

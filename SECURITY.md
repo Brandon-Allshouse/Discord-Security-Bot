@@ -65,7 +65,9 @@ These are what we most want to hear about, because they'd break the promises the
 - **Actions without permission.** Making the bot delete, quarantine, time out, kick or ban in a server, or using the alert buttons (**Restore**, **Mark false positive**, **Confirm**, **Release**) without the right role. *(NIST AC-3, AC-6 · ASVS V8 · OWASP Top 10: Broken Access Control)*
 - **Injection.** SQL injection, markdown or mention injection in alerts (like getting an alert to ping `@everyone`), or anything that gets the bot to run or render content an attacker controls. *(NIST SI-10 · ASVS V1, V2 · OWASP Top 10: Injection)*
 - **SSRF when following redirects.** Getting the worker to reach private, loopback, link-local or cloud-metadata addresses, including through DNS rebinding or redirect chains. *(NIST SC-7 · OWASP Top 10: Server-Side Request Forgery)*
+- **Breaking intel provider terms.** Getting the worker to call VirusTotal more than 4 times a minute or 500 times a day on the free tier, or to send it anything other than a lookup. *(NIST SA-9)*
 - **User files getting out.** Any way a user's file gets uploaded to VirusTotal or another third party when the server hasn't opted in. *(NIST PT-2 · ASVS V14)*
+- **Forging dashboard requests.** Getting the bot to review, change setup or send alerts for a server without a validly signed, fresh request from the dashboard, or replaying an old one. *(NIST IA-9, AC-3 · ASVS V13)*
 - **Dashboard and API.** Authentication or OAuth flaws, session problems, CSRF, XSS, IDOR, or admin and internal endpoints missing authorization. *(NIST IA-2, AC-3 · ASVS V6–V10 · OWASP Top 10: Authentication Failures, Broken Access Control)*
 - **Leaked secrets.** Tokens, API keys or session secrets showing up in logs, errors, the dashboard or the API. *(NIST IA-5, AU-9 · ASVS V13, V16 · OWASP Top 10: Security Misconfiguration)*
 - **Tampering with the audit log.** Doing something that doesn't get recorded, or changing or deleting audit entries. *(NIST AU-2, AU-9 · ASVS V16 · OWASP Top 10: Logging and Alerting Failures)*
@@ -87,6 +89,8 @@ These are what we most want to hear about, because they'd break the promises the
 - Don't send fake reports, poisoned indicators or brigade traffic to the live network. Reproduce those locally.
 - Don't access, change or delete other people's data. If you run into some by accident, stop and let us know.
 - Don't upload real malware to public services while testing. Use a test file like EICAR.
+- Test redirect and SSRF handling against your own local setup, not against other people's servers or cloud metadata endpoints you don't own.
+- Don't post real scam or lookalike links in Discord to test detection. Discord may suspend the account that posts them. Use `https://equinox-test.invalid/...` or `/equinox check` instead.
 - Give us a reasonable amount of time to fix things before you go public.
 
 If you follow this policy in good faith, we won't take legal action against you.
@@ -99,18 +103,19 @@ These are the protections Equinox is designed around, and the controls they cove
 |---|---|
 | **Tenant isolation.** Each Discord server is a tenant. Tenant queries run as a restricted database role under row-level security, so data can't cross between servers even if a query forgets its filter. Only indicators (domains, hashes) are shared across the network, never anything a server's members wrote. | NIST AC-4, SC-4 · ASVS V8 · OWASP Top 10: Broken Access Control |
 | **Deny by default.** Changing settings needs Manage Server. Alert buttons need Manage Server or the server's mod role. Denied attempts get logged. | NIST AC-3, AC-6, AC-7 · ASVS V8 · OWASP Top 10: Broken Access Control |
+| **The dashboard never holds the bot token.** Anything that needs Discord permissions is a signed, short-lived request to the bot, which checks it again and audits it. | NIST IA-9, AC-6 · ASVS V13 |
 | **Least privilege.** The bot only asks for the intents and permissions it uses. The container runs as a non-root user on a read-only filesystem, with all capabilities dropped. | NIST AC-6, CM-7 · OWASP Top 10: Security Misconfiguration |
 | **Input validation.** Every signal, command option and button ID is checked with zod or strict parsing. Database queries are always parameterized. | NIST SI-10 · ASVS V1, V2 · OWASP Top 10: Injection |
 | **Safe output.** Alerts escape markdown, defang bad links and can't ping anyone. | ASVS V1 · OWASP Top 10: Injection |
 | **An audit log you can't rewrite.** Every detection, action, review and settings change is recorded with who did it and to whom. The database rejects updates, deletes and truncates on the audit log. | NIST AU-2, AU-3, AU-9, AU-12 · ASVS V16 |
 | **Safe errors.** When something breaks, users get a reference ID, never a stack trace. One failed action doesn't stop the rest. | NIST SI-11 · ASVS V16 · OWASP Top 10: Mishandling of Exceptional Conditions |
 | **Secrets** only live in environment variables. They're checked at startup without ever being printed, and blanked out of logs. | NIST IA-5, CM-6 · ASVS V13 |
-| **Rate limits** on commands and buttons, and a cap on how much work one message can cause. | NIST SC-5 · ASVS V2 |
-| **Following redirects** (*planned*, M4) will block private, loopback, link-local and cloud-metadata addresses, checked again after DNS resolution and on every redirect. It follows at most 5 hops with a 5-second timeout and a 1 MB cap, doesn't run JavaScript and doesn't send cookies. | NIST SC-7 · OWASP Top 10: Server-Side Request Forgery |
+| **Rate limits** on commands and buttons, a cap on how much work one message can cause, and a cap on how many threat-intel lookups one server can trigger (30 a minute). | NIST SC-5 · ASVS V2 |
+| **Following redirects** blocks private, loopback, link-local and cloud-metadata addresses, checked after DNS resolution, at connect time and on every redirect. It follows at most 5 hops with a 5-second timeout and a 1 MB cap, only on ports 80 and 443, doesn't run JavaScript and doesn't send cookies. It runs in its own container with no Discord credentials. | NIST SC-7, AC-6 · OWASP Top 10: Server-Side Request Forgery |
 | **Downloaded content** is never run or opened. Attachments will be hashed as they stream in and never written to disk (*planned*, M6). | NIST SI-3 |
-| **VirusTotal** is only used for lookups. Uploading files is a per-server opt-in, off by default. The free tier is non-commercial, so we'll move to a licensed source before any paid use. | NIST PT-2, SA-9 · ASVS V14 |
+| **VirusTotal** is only used for lookups, and only for links that already look off or show up in several servers. Its free-tier limits are enforced across all workers and can't be configured higher. Uploading files is a per-server opt-in, off by default. The free tier is non-commercial, so we'll move to a licensed source before any paid use. | NIST PT-2, SA-9 · ASVS V14 |
 | **Keeping little, briefly.** We store IDs, hashes and normalized URLs. Message content is only kept as evidence for confirmed detections. Fingerprints expire after 24 hours, unconfirmed indicators after 30 days and detection records after 90, and a job cleans them up. | NIST PT-2, SI-12, AU-11 · ASVS V14 |
 | **Supply chain.** Frozen lockfile, exact versions, install scripts blocked by default, nothing newer than 3 days, `pnpm audit` in CI, Dependabot updates, Actions pinned to commit SHAs, and a read-only CI token. | NIST SSDF PO.5, PS.2, PS.3, PW.4, RV.1 · NIST SR-3, RA-5 · OWASP Top 10: Software Supply Chain Failures |
 | **Security testing.** Authorization, tenant isolation, the audit log and input handling all have automated tests, and they run in CI against real Postgres and Redis. CodeQL scans every push and pull request, plus once a week. | NIST SSDF PW.7, PW.8 · NIST SA-11, RA-5 |
-| **Undo.** Every automatic action is logged and can be reversed from Discord (and later the dashboard). | NIST AU-2 |
+| **Undo.** Every automatic action is logged and can be reversed from Discord or the dashboard. | NIST AU-2 |
 | **Careful defaults.** New servers start in `alert_only`. Kicks and bans are never automatic. Hijacked accounts get quarantined, not banned. | NIST CM-6 |

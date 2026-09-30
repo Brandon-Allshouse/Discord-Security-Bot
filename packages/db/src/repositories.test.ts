@@ -4,7 +4,7 @@ import { makeSignal } from '@equinox/core/testing';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, runMigrations, type DbHandle } from './client.js';
-import { createStores, SystemStore, type Stores } from './repositories.js';
+import { createStores, ProviderResultStore, SystemStore, type Stores } from './repositories.js';
 import { auditLog, detections, guildAllowlist, guilds } from './schema.js';
 import { asTenant } from './tenant.js';
 
@@ -196,6 +196,51 @@ describe('tenant isolation (row-level security)', () => {
     const [row] = [...result];
     expect(row?.tenant ?? '').toBe('');
     expect(row?.role).not.toBe('equinox_tenant');
+  });
+});
+
+describe('late intel on detections', () => {
+  it('finds the detection for a message and subject, within the tenant only', async () => {
+    const signal = makeSignal({ guildId: TENANT_A, messageId: '400000000000000777', subject: 'https://late.test/' });
+    const detection = await stores.detections.create({ signal, verdict });
+    expect((await stores.detections.findForMessage(TENANT_A, '400000000000000777', 'https://late.test/'))?.id).toBe(detection.id);
+    expect(await stores.detections.findForMessage(TENANT_A, '400000000000000777', 'https://other.test/')).toBeNull();
+    expect(await stores.detections.findForMessage(TENANT_B, '400000000000000777', 'https://late.test/')).toBeNull();
+
+    const worse: Verdict = { level: 'malicious', score: 0.95, sources: ['heuristic', 'urlhaus'], reasons: ['Listed'] };
+    await stores.detections.updateVerdict(TENANT_B, detection.id, worse);
+    expect((await stores.detections.get(TENANT_A, detection.id))?.verdict.level).toBe('suspicious');
+    await stores.detections.updateVerdict(TENANT_A, detection.id, worse);
+    expect((await stores.detections.get(TENANT_A, detection.id))?.verdict).toEqual(worse);
+  });
+});
+
+describe('provider result cache', () => {
+  const result = {
+    provider: 'virustotal',
+    kind: 'url' as const,
+    subject: 'https://cache.test/',
+    level: 'malicious' as const,
+    weight: 0.9,
+    reasons: ['Flagged by 5 engines'],
+    details: { malicious: 5 },
+  };
+
+  it('stores, overwrites, expires and cleans up answers', async () => {
+    const cache = new ProviderResultStore(handle.db);
+    await cache.put(result, 60);
+    expect(await cache.get('virustotal', 'url', 'https://cache.test/')).toEqual(result);
+    await cache.put({ ...result, level: 'clean', weight: 0, reasons: [] }, 60);
+    expect((await cache.get('virustotal', 'url', 'https://cache.test/'))?.level).toBe('clean');
+    expect(await cache.get('rdap', 'url', 'https://cache.test/')).toBeNull();
+
+    const later = new Date(Date.now() + 120_000);
+    expect(await cache.get('virustotal', 'url', 'https://cache.test/', later)).toBeNull();
+    expect(await cache.deleteExpired(later)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('is invisible to tenants', async () => {
+    await expect(asTenant(handle.db, TENANT_A, (tx) => tx.execute(sql`select * from provider_results`))).rejects.toThrow();
   });
 });
 

@@ -1,7 +1,18 @@
-import type { AuditEntry, Detection, GuildMode, GuildSettings } from '@equinox/core';
+import type {
+  AuditEntry,
+  DashboardAction,
+  Detection,
+  GuildMode,
+  GuildSettings,
+  GuildSnapshot,
+  IntelStatus,
+  IntelSummary,
+} from '@equinox/core';
 import { makeGuild } from '@equinox/core/testing';
 import { buildApp, type DashboardStores } from './app.js';
 import type { DiscordLogin, DiscordOAuth } from './discord-oauth.js';
+import type { BotLink, SendOutcome } from './bot-link.js';
+import type { DashboardIntel } from './intel.js';
 import { newToken, type Session, type SessionStore } from './sessions.js';
 
 export const TENANT = '100000000000000001';
@@ -28,7 +39,7 @@ export class MemorySessionStore implements SessionStore {
 }
 
 /** The dashboard with in-memory stores, two tenants and a Discord that logs ADMIN in as a manager of TENANT only. */
-export async function createTestApp() {
+export async function createTestApp(publicUrl = 'http://localhost:3000') {
   const guilds = new Map<string, GuildSettings>([
     [TENANT, makeGuild({ id: TENANT })],
     [OTHER_TENANT, makeGuild({ id: OTHER_TENANT })],
@@ -68,6 +79,28 @@ export async function createTestApp() {
         if (index >= 0) allowlist.splice(index, 1);
         return Promise.resolve(index >= 0);
       },
+      hasAny: (id, _type, values) => Promise.resolve(allowlist.some((a) => a.guildId === id && values.includes(a.value))),
+    },
+  };
+
+  /** Threat intel as the dashboard sees it. Set `down` to make every call fail. */
+  const intelState = {
+    status: null as IntelStatus | null,
+    cached: new Map<string, IntelSummary>(),
+    blocklist: new Set<string>(),
+    lookups: [] as { url: string; heuristicScore: number }[],
+    down: false,
+  };
+  const fail = () => Promise.reject(new Error('redis down'));
+  const intel: DashboardIntel = {
+    status: () => (intelState.down ? fail() : Promise.resolve(intelState.status)),
+    cached: (url) => (intelState.down ? fail() : Promise.resolve(intelState.cached.get(url) ?? null)),
+    isBlocklisted: (candidates) =>
+      intelState.down ? fail() : Promise.resolve(candidates.some((c) => intelState.blocklist.has(c))),
+    requestLookup: (url, heuristicScore) => {
+      if (intelState.down) return fail();
+      intelState.lookups.push({ url, heuristicScore });
+      return Promise.resolve();
     },
   };
 
@@ -84,7 +117,25 @@ export async function createTestApp() {
     login: () => (discord.login instanceof Error ? Promise.reject(discord.login) : Promise.resolve(discord.login)),
   };
 
-  const app = await buildApp({ stores, sessions, oauth, publicUrl: 'http://localhost:3000' });
+  /** The bot as the dashboard sees it: a snapshot per server, and requests with a canned answer. */
+  const botState = {
+    enabled: true,
+    snapshots: new Map<string, GuildSnapshot>(),
+    sent: [] as DashboardAction[],
+    answer: 'reviewed' as SendOutcome,
+  };
+  const bot: BotLink = {
+    get enabled() {
+      return botState.enabled;
+    },
+    snapshot: (guildId) => Promise.resolve(botState.snapshots.get(guildId) ?? null),
+    send: (action) => {
+      botState.sent.push(action);
+      return Promise.resolve(botState.enabled ? botState.answer : 'off');
+    },
+  };
+
+  const app = await buildApp({ stores, sessions, oauth, intel, bot, publicUrl });
 
   /** Goes through the real login routes and returns the session cookie and CSRF token. */
   async function logIn() {
@@ -99,5 +150,5 @@ export async function createTestApp() {
     return { cookies: { eq_session: id }, csrf: sessions.sessions.get(id)!.csrf, callback };
   }
 
-  return { app, guilds, detections, audit, allowlist, sessions, discord, logIn };
+  return { app, guilds, detections, audit, allowlist, sessions, discord, logIn, intel: intelState, bot: botState };
 }

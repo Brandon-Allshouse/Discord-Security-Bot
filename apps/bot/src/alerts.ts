@@ -16,6 +16,7 @@ import {
   type GuildMode,
   type ReviewDecision,
   type SignalKind,
+  type VerdictLevel,
 } from '@equinox/core';
 
 const KIND_LABEL: Record<SignalKind, string> = {
@@ -51,15 +52,37 @@ function formatOutcomes(outcomes: readonly ActionOutcome[]): string {
     .join('\n');
 }
 
-export function buildAlertEmbed(detection: Detection, mode: GuildMode, outcomes: readonly ActionOutcome[]) {
+/** Intel sources that are not the sensor's own checks, for the "found by threat intel" note. */
+const LOCAL_SOURCES = new Set(['heuristic', 'allowlist', 'blocklist']);
+
+export function buildAlertEmbed(
+  detection: Detection,
+  mode: GuildMode,
+  outcomes: readonly ActionOutcome[],
+  escalatedFrom?: VerdictLevel,
+) {
   const { verdict } = detection;
   const level = verdict.level === 'malicious' ? 'Malicious' : 'Suspicious';
   const subject = detection.signalKind === 'url' ? defang(detection.subject) : detection.subject;
+  const intelSources = verdict.sources.filter((s) => !LOCAL_SOURCES.has(s));
+  const title = escalatedFrom
+    ? `⬆️ Now ${level.toLowerCase()}: ${KIND_LABEL[detection.signalKind]} updated by threat intel`
+    : `${verdict.level === 'malicious' ? '🚨' : '⚠️'} ${level} ${KIND_LABEL[detection.signalKind]} detected`;
 
   const embed = new EmbedBuilder()
-    .setTitle(`${verdict.level === 'malicious' ? '🚨' : '⚠️'} ${level} ${KIND_LABEL[detection.signalKind]} detected`)
+    .setTitle(title)
     .setColor(COLOR[verdict.level])
     .addFields(
+      ...(escalatedFrom
+        ? [
+            {
+              name: 'Update',
+              value: `This detection was ${escalatedFrom} until threat intel came back (${intelSources.join(', ') || 'intel'}). Same detection, same buttons; this alert shows the new verdict.`,
+            },
+          ]
+        : intelSources.length > 0
+          ? [{ name: 'Threat intel', value: `Found by ${intelSources.join(', ')}` }]
+          : []),
       { name: 'User', value: `<@${detection.userId}> (${detection.userId})`, inline: true },
       ...(detection.channelId ? [{ name: 'Channel', value: `<#${detection.channelId}>`, inline: true }] : []),
       { name: 'Score', value: `${Math.round(verdict.score * 100)}% · ${verdict.sources.join(', ')}`, inline: true },
@@ -80,6 +103,7 @@ export function buildAlertMessage(
   detection: Detection,
   mode: GuildMode,
   outcomes: readonly ActionOutcome[],
+  escalatedFrom?: VerdictLevel,
 ): MessageCreateOptions {
   const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(reviewCustomId('restore', detection.id)).setLabel('Restore').setStyle(ButtonStyle.Secondary),
@@ -90,7 +114,7 @@ export function buildAlertMessage(
     new ButtonBuilder().setCustomId(reviewCustomId('confirm', detection.id)).setLabel('Confirm').setStyle(ButtonStyle.Danger),
   );
   return {
-    embeds: [buildAlertEmbed(detection, mode, outcomes)],
+    embeds: [buildAlertEmbed(detection, mode, outcomes, escalatedFrom)],
     components: [buttons],
     // Alerts never ping anyone, whatever ends up in the text.
     allowedMentions: { parse: [] },

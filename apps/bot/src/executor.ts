@@ -8,7 +8,7 @@ const QUARANTINE_TIMEOUT_MS = 10 * 60 * 1000;
 export class DiscordActionExecutor implements ActionExecutor {
   constructor(private readonly client: Client) {}
 
-  async execute(action: ActionKind, { guild, detection, previous }: ActionContext): Promise<ActionOutcome> {
+  async execute(action: ActionKind, { guild, detection, previous, escalatedFrom }: ActionContext): Promise<ActionOutcome> {
     const discordGuild = await this.client.guilds.fetch(guild.id);
     const reason = `${BRAND.name} detection ${detection.id}`;
 
@@ -20,8 +20,9 @@ export class DiscordActionExecutor implements ActionExecutor {
         if (!guild.alertChannelId) return { action, ok: false, detail: `No alert channel set, run ${slash('setup')}` };
         const channel = await discordGuild.channels.fetch(guild.alertChannelId);
         if (!channel?.isSendable()) return { action, ok: false, detail: 'Alert channel is not sendable' };
-        await channel.send(buildAlertMessage(detection, guild.mode, previous));
-        return { action, ok: true };
+        const sent = await channel.send(buildAlertMessage(detection, guild.mode, previous, escalatedFrom));
+        // Remembered so the alert can be updated if the detection is resolved from the dashboard.
+        return { action, ok: true, ref: { channelId: channel.id, messageId: sent.id } };
       }
 
       case 'delete': {

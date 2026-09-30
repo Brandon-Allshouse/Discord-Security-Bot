@@ -1,8 +1,16 @@
 import type { Redis } from 'ioredis';
-import { domainCandidates, normalizeUrl, type GuildRepository, type GuildSettings, type IndicatorLookup, type Signal } from '@equinox/core';
+import {
+  BLOCKLIST_DOMAINS_KEY,
+  domainCandidates,
+  normalizeUrl,
+  type GuildRepository,
+  type GuildSettings,
+  type IndicatorLookup,
+  type Signal,
+} from '@equinox/core';
 import type { AllowlistStore, GuildStore } from '@equinox/db';
 
-export const BLOCKLIST_DOMAINS_KEY = 'equinox:blocklist:domain';
+export { BLOCKLIST_DOMAINS_KEY };
 
 /** Blocklist lives in Redis (sub-ms set lookups); allowlists live in Postgres per guild. */
 export class IndicatorService implements IndicatorLookup {

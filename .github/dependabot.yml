@@ -55,6 +55,7 @@ updates:
     directories:
       - /apps/bot
       - /apps/dashboard
+      - /apps/worker
     schedule:
       interval: weekly
       day: monday

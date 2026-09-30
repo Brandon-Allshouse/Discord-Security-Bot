@@ -97,3 +97,27 @@ export const guildAllowlist = pgTable(
   },
   (table) => [uniqueIndex('guild_allowlist_unique').on(table.guildId, table.type, table.value)],
 );
+
+/**
+ * Network-wide cache of threat-intel answers (spec §4). No guild_id: it holds indicators only,
+ * never who saw them. Tenant roles get no access; only the intel worker reads and writes it.
+ */
+export const providerResults = pgTable(
+  'provider_results',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    provider: text('provider').notNull(),
+    kind: text('kind').notNull(),
+    subject: text('subject').notNull(),
+    verdictLevel: text('verdict_level').notNull(),
+    weight: real('weight').notNull().default(0),
+    reasons: text('reasons').array().notNull().default(sql`'{}'::text[]`),
+    details: jsonb('details').$type<Record<string, unknown>>().notNull().default({}),
+    fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('provider_results_unique').on(table.provider, table.kind, table.subject),
+    index('provider_results_expires_idx').on(table.expiresAt),
+  ],
+);

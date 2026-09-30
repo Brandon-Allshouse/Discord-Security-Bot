@@ -15,6 +15,17 @@ describe('RateLimiter', () => {
     now = 1000;
     expect(limiter.take('a')).toBe(true);
   });
+
+  it('stays bounded in memory when flooded with new keys', () => {
+    let now = 0;
+    const limiter = new RateLimiter(1, 1000, () => now);
+    for (let i = 0; i < 10_000; i++) limiter.take(`old-${i}`);
+    now = 2000;
+    limiter.take('new');
+    const hits = (limiter as unknown as { hits: Map<string, unknown> }).hits;
+    expect(hits.size).toBe(1);
+    expect(limiter.take('old-0')).toBe(true);
+  });
 });
 
 describe('display helpers', () => {

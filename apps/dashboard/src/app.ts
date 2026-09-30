@@ -2,35 +2,77 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import cookie from '@fastify/cookie';
 import formbody from '@fastify/formbody';
 import { fastify, LogController, type FastifyBaseLogger, type FastifyReply, type FastifyRequest } from 'fastify';
-import { GUILD_MODES, parseDomainInput, RateLimiter, type GuildMode, type GuildSettings } from '@equinox/core';
+import {
+  checkLink,
+  domainCandidates,
+  GUILD_MODES,
+  parseDomainInput,
+  parseLinkInput,
+  RateLimiter,
+  REVIEW_DECISIONS,
+  type DashboardAction,
+  type GuildMode,
+  type GuildSettings,
+} from '@equinox/core';
 import type { AllowlistStore, AuditStore, DetectionStore, GuildStore } from '@equinox/db';
+import type { BotLink, SendOutcome } from './bot-link.js';
 import type { DiscordOAuth } from './discord-oauth.js';
 import type { Html } from './html.js';
+import type { DashboardIntel } from './intel.js';
 import { newToken, SESSION_TTL_SECONDS, type Session, type SessionStore } from './sessions.js';
-import { ERRORS, landingPage, messagePage, NOTICES, serversPage, STYLESHEET, tenantPage } from './views.js';
+import { checkResultPage, ERRORS, landingPage, messagePage, NOTICES, serversPage, STYLESHEET, tenantPage } from './views.js';
 
 /** The tenant-scoped stores the dashboard uses. Everything goes through row-level security. */
 export interface DashboardStores {
   guilds: Pick<GuildStore, 'get' | 'setMode'>;
   detections: Pick<DetectionStore, 'recent' | 'countOpen'>;
   audit: Pick<AuditStore, 'write' | 'recent'>;
-  allowlist: Pick<AllowlistStore, 'list' | 'add' | 'remove'>;
+  allowlist: Pick<AllowlistStore, 'list' | 'add' | 'remove' | 'hasAny'>;
 }
 
 export interface DashboardDeps {
   stores: DashboardStores;
   sessions: SessionStore;
   oauth: DiscordOAuth;
+  intel: DashboardIntel;
+  /** Requests to the bot for things that need Discord permissions (review, setup, test alert). */
+  bot: BotLink;
   /** Public address of the dashboard. Over https, cookies are marked Secure and HSTS is sent. */
   publicUrl: string;
   logger?: FastifyBaseLogger;
 }
 
-const SESSION_COOKIE = 'eq_session';
-const STATE_COOKIE = 'eq_oauth_state';
+/**
+ * Over https the cookies get the __Host- prefix: the browser then only accepts them if they're
+ * Secure, for the whole site and set by this exact host, so a subdomain or a plain-http page
+ * can't plant or overwrite them (ASVS V3). Browsers refuse the prefix over plain http.
+ */
+export function cookieNames(secure: boolean) {
+  const prefix = secure ? '__Host-' : '';
+  return { session: `${prefix}eq_session`, state: `${prefix}eq_oauth_state` };
+}
 const STATE_TTL_SECONDS = 10 * 60;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const SNOWFLAKE = /^\d{17,20}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Where to send the user after a request to the bot: a fixed notice or error key, never the bot's text. */
+const OUTCOME_REDIRECT: Record<SendOutcome, { notice: keyof typeof NOTICES } | { error: keyof typeof ERRORS }> = {
+  reviewed: { notice: 'reviewed' },
+  setup_saved: { notice: 'setup' },
+  test_sent: { notice: 'test' },
+  already_resolved: { error: 'already_resolved' },
+  not_found: { error: 'detection_missing' },
+  setup_bad_channel: { error: 'setup_channel' },
+  setup_bad_mod_role: { error: 'setup_mod_role' },
+  setup_bad_quarantine_role: { error: 'setup_quarantine_role' },
+  test_not_detected: { error: 'test_failed' },
+  guild_unavailable: { error: 'bot_unavailable' },
+  bot_unavailable: { error: 'bot_unavailable' },
+  timeout: { error: 'bot_timeout' },
+  rejected: { error: 'bot_rejected' },
+  off: { error: 'bot_off' },
+};
 
 // No scripts at all, styles and forms only from this site, and no framing.
 const CSP = "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
@@ -53,7 +95,7 @@ function send(reply: FastifyReply, page: Html, status = 200): FastifyReply {
 }
 
 export async function buildApp(deps: DashboardDeps) {
-  const { stores, sessions, oauth } = deps;
+  const { stores, sessions, oauth, intel, bot } = deps;
   const publicUrl = new URL(deps.publicUrl);
   const secure = publicUrl.protocol === 'https:';
   const app = fastify({
@@ -66,9 +108,14 @@ export async function buildApp(deps: DashboardDeps) {
   await app.register(formbody);
 
   const cookieOptions = { path: '/', httpOnly: true, sameSite: 'lax', secure } as const;
+  const { session: SESSION_COOKIE, state: STATE_COOKIE } = cookieNames(secure);
   const limits = {
     requests: new RateLimiter(120, 60_000),
     logins: new RateLimiter(10, 60_000),
+    /** Per user. Each check of an unknown link can mean outside lookups by the intel worker. */
+    checks: new RateLimiter(10, 60_000),
+    /** Per user: review, setup and test requests to the bot. */
+    actions: new RateLimiter(30, 60_000),
   };
 
   app.addHook('onRequest', async (request, reply) => {
@@ -233,11 +280,14 @@ export async function buildApp(deps: DashboardDeps) {
     const tenant = await tenantFor(request, reply);
     if (!tenant) return reply;
     const { session, guild, name } = tenant;
-    const [openCount, detections, allowlist, audit] = await Promise.all([
+    const [openCount, detections, allowlist, audit, intelStatus, snapshot] = await Promise.all([
       stores.detections.countOpen(guild.id),
       stores.detections.recent(guild.id, 50),
       stores.allowlist.list(guild.id),
       stores.audit.recent(guild.id, 50),
+      // Intel and the bot's snapshot are extras: if Redis can't answer, the page still loads and says so.
+      intel.status().catch(() => null),
+      bot.snapshot(guild.id).catch(() => null),
     ]);
     // Messages come from a fixed table, so nothing from the query string is ever shown.
     const notice = field(request.query, 'notice');
@@ -252,6 +302,9 @@ export async function buildApp(deps: DashboardDeps) {
         detections,
         allowlist,
         audit,
+        intelStatus,
+        snapshot,
+        botEnabled: bot.enabled,
         notice: Object.hasOwn(NOTICES, notice) ? (notice as keyof typeof NOTICES) : undefined,
         error: Object.hasOwn(ERRORS, error) ? (error as keyof typeof ERRORS) : undefined,
       }),
@@ -274,6 +327,108 @@ export async function buildApp(deps: DashboardDeps) {
       details: { from: guild.mode, to: mode, via: 'dashboard' },
     });
     return reply.redirect(`/servers/${guild.id}?notice=mode`, 303);
+  });
+
+  /** Sends a request to the bot and redirects back with a fixed notice or error. */
+  async function sendToBot(reply: FastifyReply, guildId: string, action: DashboardAction): Promise<FastifyReply> {
+    const outcome = await bot.send(action).catch(() => 'bot_unavailable' as const);
+    const target = OUTCOME_REDIRECT[outcome];
+    const query = 'notice' in target ? `notice=${target.notice}` : `error=${target.error}`;
+    return reply.redirect(`/servers/${guildId}?${query}`, 303);
+  }
+
+  /** Common checks for requests to the bot: logged in, manages this server, CSRF, rate limit. */
+  async function actionTenant(request: FastifyRequest, reply: FastifyReply) {
+    const tenant = await tenantFor(request, reply);
+    if (!tenant || !csrfOk(request, reply, tenant.session)) return null;
+    if (!limits.actions.take(tenant.session.userId)) {
+      void send(reply, messagePage('Slow down', 'Too many changes in a minute. Try again shortly.', tenant.session), 429);
+      return null;
+    }
+    return tenant;
+  }
+
+  /** Restore, false positive or confirm, like the buttons on the alert in Discord. */
+  app.post('/servers/:guildId/detections/:detectionId/review', async (request, reply) => {
+    const tenant = await actionTenant(request, reply);
+    if (!tenant) return reply;
+    const detectionId = field(request.params, 'detectionId');
+    const decision = field(request.body, 'decision') as (typeof REVIEW_DECISIONS)[number];
+    if (!UUID.test(detectionId) || !REVIEW_DECISIONS.includes(decision)) {
+      return reply.redirect(`/servers/${tenant.guild.id}?error=detection_missing`, 303);
+    }
+    return sendToBot(reply, tenant.guild.id, {
+      type: 'review',
+      guildId: tenant.guild.id,
+      actorId: tenant.session.userId,
+      detectionId,
+      decision,
+    });
+  });
+
+  /** Alert channel, mod role and quarantine role, like /equinox setup. The bot re-checks all of it. */
+  app.post('/servers/:guildId/setup', async (request, reply) => {
+    const tenant = await actionTenant(request, reply);
+    if (!tenant) return reply;
+    const channel = field(request.body, 'alert_channel');
+    const modRole = field(request.body, 'mod_role');
+    const quarantineRole = field(request.body, 'quarantine_role');
+    if (!SNOWFLAKE.test(channel)) return reply.redirect(`/servers/${tenant.guild.id}?error=setup_channel`, 303);
+    if (modRole && !SNOWFLAKE.test(modRole)) return reply.redirect(`/servers/${tenant.guild.id}?error=setup_mod_role`, 303);
+    if (quarantineRole && !SNOWFLAKE.test(quarantineRole)) {
+      return reply.redirect(`/servers/${tenant.guild.id}?error=setup_quarantine_role`, 303);
+    }
+    return sendToBot(reply, tenant.guild.id, {
+      type: 'setup',
+      guildId: tenant.guild.id,
+      actorId: tenant.session.userId,
+      alertChannelId: channel,
+      modRoleId: modRole || null,
+      quarantineRoleId: quarantineRole || null,
+    });
+  });
+
+  /** A harmless test alert, like /equinox test. */
+  app.post('/servers/:guildId/test', async (request, reply) => {
+    const tenant = await actionTenant(request, reply);
+    if (!tenant) return reply;
+    return sendToBot(reply, tenant.guild.id, { type: 'test', guildId: tenant.guild.id, actorId: tenant.session.userId });
+  });
+
+  /**
+   * "Check a link", like /equinox check in Discord: local heuristics, this server's allowlist,
+   * the network blocklist and cached intel. Unknown links are queued for the intel worker.
+   * A POST with the CSRF token, so another site can't make an admin's browser trigger lookups.
+   */
+  app.post('/servers/:guildId/check', async (request, reply) => {
+    const tenant = await tenantFor(request, reply);
+    if (!tenant || !csrfOk(request, reply, tenant.session)) return reply;
+    const { session, guild, name } = tenant;
+    if (!limits.checks.take(session.userId)) {
+      return send(reply, messagePage('Slow down', 'You can check 10 links a minute. Try again shortly.', session), 429);
+    }
+    const input = field(request.body, 'url');
+    const finding = parseLinkInput(input);
+    if (!finding) return reply.redirect(`/servers/${guild.id}?error=url`, 303);
+
+    const candidates = domainCandidates(finding.normalized);
+    const [allowlisted, blocklisted, cached] = await Promise.all([
+      stores.allowlist.hasAny(guild.id, 'domain', candidates),
+      intel.isBlocklisted(candidates).catch(() => false),
+      intel.cached(finding.normalized.url).catch(() => null),
+    ]);
+    const result = checkLink(finding, { allowlisted, blocklisted, intel: cached });
+    let queued = false;
+    if (result.intelState === 'pending') {
+      queued = await intel
+        .requestLookup(result.url, finding.score)
+        .then(() => true)
+        .catch((err: unknown) => {
+          request.log.warn({ err: { message: err instanceof Error ? err.message : 'unknown' } }, 'could not queue intel lookup');
+          return false;
+        });
+    }
+    return send(reply, checkResultPage({ session, guildId: guild.id, name, result, queued }));
   });
 
   app.post('/servers/:guildId/allowlist', async (request, reply) => {

@@ -9,24 +9,23 @@ import {
 } from 'discord.js';
 import {
   BRAND,
+  checkLink,
   defang,
   domainCandidates,
-  findLinks,
   GUILD_MODES,
-  normalizeUrl,
+  parseLinkInput,
   parseDomainInput,
-  processSignal,
-  reviewDetection,
   slash,
-  THRESHOLDS,
   truncate,
   type GuildMode,
   type GuildSettings,
+  type LinkCheck,
 } from '@equinox/core';
 import { parseReviewCustomId, resolvedAlertEmbed } from '../alerts.js';
 import { isAuthorized, requiredAccess, type MemberAccess } from '../authz.js';
 import type { BotContext } from '../context.js';
-import { canPostAlerts, missingGuildPermissions } from '../permissions.js';
+import { reviewWithFollowUps, resolveAlertMessages, saveSetup, sendTestSignal, setupProblem } from '../moderation.js';
+import { missingGuildPermissions } from '../permissions.js';
 
 type CachedInteraction = ChatInputCommandInteraction<'cached'> | ButtonInteraction<'cached'>;
 
@@ -118,32 +117,27 @@ async function setup(interaction: ChatInputCommandInteraction<'cached'>, ctx: Bo
   const modRole = interaction.options.getRole('mod_role');
   const quarantineRole = interaction.options.getRole('quarantine_role');
 
-  if (!channel.isTextBased() || !canPostAlerts(channel)) {
+  const problem = setupProblem(interaction.guildId, channel, modRole, quarantineRole);
+  if (problem === 'setup_bad_channel') {
     await interaction.reply(ephemeral(`I can’t post in ${channel.toString()}. I need View Channel, Send Messages and Embed Links there.`));
     return;
   }
-  if (quarantineRole && !quarantineRole.editable) {
-    await interaction.reply(ephemeral(`I can’t manage ${quarantineRole.toString()}. Move my role above it.`));
+  if (problem === 'setup_bad_quarantine_role') {
+    await interaction.reply(ephemeral(`I can’t manage ${quarantineRole!.toString()}. Move my role above it.`));
     return;
   }
-  if (modRole?.managed || modRole?.id === interaction.guildId) {
+  if (problem === 'setup_bad_mod_role') {
     await interaction.reply(ephemeral('Pick a regular role for moderators, not @everyone or a bot role.'));
     return;
   }
 
-  const update = {
-    alertChannelId: channel.id,
-    ...(modRole ? { modRoleIds: [modRole.id] } : {}),
-    ...(quarantineRole ? { quarantineRoleId: quarantineRole.id } : {}),
-  };
-  await ctx.stores.guilds.configure(interaction.guildId, update);
-  ctx.guildCache.invalidate(interaction.guildId);
-  await ctx.stores.audit.write({
+  await saveSetup(ctx, {
     guildId: interaction.guildId,
-    actor: interaction.user.id,
-    action: 'settings.setup',
-    target: null,
-    details: update,
+    actorId: interaction.user.id,
+    alertChannelId: channel.id,
+    modRoleId: modRole?.id ?? null,
+    quarantineRoleId: quarantineRole?.id ?? null,
+    via: 'discord',
   });
   await interaction.reply(
     ephemeral(
@@ -199,20 +193,12 @@ async function status(
 
 async function testSignal(interaction: ChatInputCommandInteraction<'cached'>, ctx: BotContext): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const result = await processSignal(
-    {
-      id: randomUUID(),
-      kind: 'url',
-      guildId: interaction.guildId,
-      userId: interaction.user.id,
-      channelId: interaction.channelId,
-      subject: `https://${BRAND.testDomain}/`,
-      heuristicScore: 0.9,
-      reasons: [`Test signal sent by ${slash('test')}`],
-      createdAt: new Date(),
-    },
-    ctx.deps,
-  );
+  const result = await sendTestSignal(ctx, {
+    guildId: interaction.guildId,
+    actorId: interaction.user.id,
+    channelId: interaction.channelId,
+    via: 'discord',
+  });
   if (result.status !== 'detected') {
     await interaction.editReply(`Test signal was not detected (${result.status}).`);
     return;
@@ -222,35 +208,51 @@ async function testSignal(interaction: ChatInputCommandInteraction<'cached'>, ct
 }
 
 async function check(interaction: ChatInputCommandInteraction<'cached'>, ctx: BotContext): Promise<void> {
-  const input = interaction.options.getString('url', true);
-  const [finding] = findLinks(input.includes('://') ? input : `http://${input}`);
+  const finding = parseLinkInput(interaction.options.getString('url', true));
   if (!finding) {
     await interaction.reply(ephemeral('That doesn’t look like a URL.'));
     return;
   }
   const candidates = domainCandidates(finding.normalized);
-  const [blocked, allowed] = await Promise.all([
+  const [blocklisted, allowlisted, intel] = await Promise.all([
     ctx.indicators.isDomainBlocklisted(candidates),
     ctx.stores.allowlist.hasAny(interaction.guildId, 'domain', candidates),
+    ctx.intelCache.forUrl(finding.normalized.url).catch(() => null),
   ]);
-  const level = allowed
+  const result = checkLink(finding, { allowlisted, blocklisted, intel });
+  if (result.intelState === 'pending') {
+    await ctx.intel
+      .lookup(result.url, finding.score)
+      .catch((err: unknown) =>
+        ctx.logger.warn({ err: { message: err instanceof Error ? err.message : 'unknown' } }, 'could not queue intel lookup'),
+      );
+  }
+  await interaction.reply(ephemeral(truncate(formatLinkCheck(result), 1900)));
+}
+
+const CHECK_LEVEL: Record<LinkCheck['level'], string> = {
+  malicious: 'Malicious',
+  suspicious: 'Suspicious',
+  clean: 'No known issues',
+};
+
+/** The /check reply. Exported for tests. */
+export function formatLinkCheck(result: LinkCheck): string {
+  const level = result.allowlisted
     ? 'Clean (allowlisted here)'
-    : blocked
+    : result.blocklisted
       ? `Malicious (on the ${BRAND.name} blocklist)`
-      : finding.score >= THRESHOLDS.malicious
-        ? 'Malicious'
-        : finding.score >= THRESHOLDS.suspicious
-          ? 'Suspicious'
-          : 'No known issues';
-  const reasons = finding.reasons.length ? finding.reasons.map((r) => `• ${r}`).join('\n') : '';
-  await interaction.reply(
-    ephemeral(
-      truncate(
-        `\`${defang(finding.normalized.url).replace(/`/g, 'ˋ')}\`\n**${level}** · score ${Math.round(finding.score * 100)}%\n${reasons}`,
-        1900,
-      ),
-    ),
-  );
+      : CHECK_LEVEL[result.level];
+  const reasons = result.reasons.map((r) => `• ${r}`).join('\n');
+  const intel =
+    result.intelState === 'checked'
+      ? `Threat intel: ${result.intel?.sources.length ? result.intel.sources.join(', ') : 'no source knows of problems'}`
+      : result.intelState === 'pending'
+        ? 'Threat intel: not checked yet. Looking it up now; run this again in a minute.'
+        : '';
+  return [`\`${defang(result.url).replace(/`/g, 'ˋ')}\``, `**${level}** · score ${Math.round(result.score * 100)}%`, reasons, intel]
+    .filter((line) => line.length > 0)
+    .join('\n');
 }
 
 async function changeAllowlist(
@@ -303,9 +305,15 @@ async function handleButton(interaction: ButtonInteraction<'cached'>, ctx: BotCo
   }
 
   await interaction.deferUpdate();
-  const result = await reviewDetection(
-    { guildId: interaction.guildId, detectionId: parsed.detectionId, decision: parsed.decision, actorId: interaction.user.id },
-    ctx.deps,
+  const { result, notes } = await reviewWithFollowUps(
+    {
+      guildId: interaction.guildId,
+      detectionId: parsed.detectionId,
+      decision: parsed.decision,
+      actorId: interaction.user.id,
+      via: 'discord',
+    },
+    ctx,
   );
 
   if (result.status === 'not_found') {
@@ -317,34 +325,8 @@ async function handleButton(interaction: ButtonInteraction<'cached'>, ctx: BotCo
     return;
   }
 
-  const notes: string[] = result.reverted.map((r) => `${r.ok ? '↩️' : '❌'} undo ${r.action}${r.detail ? ` (${r.detail})` : ''}`);
-
-  // Discord has no undelete and we don't keep message text, so say so instead of implying it came back.
-  if (parsed.decision !== 'confirm' && result.detection.actionsTaken.some((a) => a.action === 'delete' && a.ok)) {
-    notes.push(`⚠️ The deleted message can’t be brought back. <@${result.detection.userId}> has to post it again.`);
-  }
-
-  // A false positive on a link means that host is fine here: allowlist it so it isn't flagged again.
-  // Exact host only, never the parent domain, so one click can't open up every subdomain.
-  if (parsed.decision === 'false_positive' && result.detection.signalKind === 'url') {
-    const normalized = normalizeUrl(result.detection.subject);
-    if (normalized?.domain) {
-      await ctx.stores.allowlist.add({
-        guildId: interaction.guildId,
-        type: 'domain',
-        value: normalized.host,
-        addedBy: interaction.user.id,
-      });
-      await ctx.stores.audit.write({
-        guildId: interaction.guildId,
-        actor: interaction.user.id,
-        action: 'allowlist.add',
-        target: normalized.host,
-        details: { via: 'false_positive', detectionId: result.detection.id },
-      });
-      notes.push(`Allowlisted \`${normalized.host}\` in this server`);
-    }
-  }
+  // An escalated detection has more than one alert: resolve the others too.
+  await resolveAlertMessages(ctx.client, result.detection, result.detection.status, interaction.user.id, notes.join('\n'), interaction.message.id);
 
   const original = interaction.message.embeds[0];
   if (original) {

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, lt, sql } from 'drizzle-orm';
 import type {
   ActionOutcome,
   AuditEntry,
@@ -9,11 +9,14 @@ import type {
   GuildMode,
   GuildRepository,
   GuildSettings,
+  IntelKind,
   NewDetection,
+  ProviderResult,
   SignalKind,
+  Verdict,
 } from '@equinox/core';
 import type { Database } from './client.js';
-import { auditLog, detections, guildAllowlist, guilds } from './schema.js';
+import { auditLog, detections, guildAllowlist, guilds, providerResults } from './schema.js';
 import { asTenant } from './tenant.js';
 
 type GuildRow = typeof guilds.$inferSelect;
@@ -148,6 +151,27 @@ export class DetectionStore implements DetectionRepository {
     );
   }
 
+  async findForMessage(guildId: string, messageId: string, subject: string): Promise<Detection | null> {
+    return asTenant(this.db, guildId, async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(detections)
+        .where(and(eq(detections.guildId, guildId), eq(detections.messageId, messageId), eq(detections.subject, subject)))
+        .orderBy(desc(detections.createdAt))
+        .limit(1);
+      return row ? toDetection(row) : null;
+    });
+  }
+
+  async updateVerdict(guildId: string, detectionId: string, verdict: Verdict): Promise<void> {
+    await asTenant(this.db, guildId, (tx) =>
+      tx
+        .update(detections)
+        .set({ verdict })
+        .where(and(eq(detections.id, detectionId), eq(detections.guildId, guildId))),
+    );
+  }
+
   /** Newest first, for the dashboard. */
   async recent(guildId: string, limit = 50): Promise<Detection[]> {
     return asTenant(this.db, guildId, async (tx) => {
@@ -243,6 +267,62 @@ export class SystemStore {
   /** Retention: removes detections past their expiry in every tenant. Returns how many were deleted. */
   async deleteExpiredDetections(now = new Date()): Promise<number> {
     const rows = await this.db.delete(detections).where(lt(detections.expiresAt, now)).returning({ id: detections.id });
+    return rows.length;
+  }
+}
+
+/**
+ * The network-wide intel cache. Holds indicators and what each source said about them,
+ * never tenant data, so it runs outside the tenant boundary. Used by the intel worker only.
+ */
+export class ProviderResultStore {
+  constructor(private readonly db: Database) {}
+
+  /** The cached answer, if it hasn't expired. */
+  async get(provider: string, kind: IntelKind, subject: string, now = new Date()): Promise<ProviderResult | null> {
+    const [row] = await this.db
+      .select()
+      .from(providerResults)
+      .where(
+        and(
+          eq(providerResults.provider, provider),
+          eq(providerResults.kind, kind),
+          eq(providerResults.subject, subject),
+          gt(providerResults.expiresAt, now),
+        ),
+      );
+    if (!row) return null;
+    return {
+      provider: row.provider,
+      kind: row.kind as IntelKind,
+      subject: row.subject,
+      level: row.verdictLevel as ProviderResult['level'],
+      weight: row.weight,
+      reasons: row.reasons,
+      details: row.details,
+    };
+  }
+
+  async put(result: ProviderResult, ttlSeconds: number, now = new Date()): Promise<void> {
+    const values = {
+      verdictLevel: result.level,
+      weight: result.weight,
+      reasons: result.reasons,
+      details: result.details,
+      fetchedAt: now,
+      expiresAt: new Date(now.getTime() + ttlSeconds * 1000),
+    };
+    await this.db
+      .insert(providerResults)
+      .values({ provider: result.provider, kind: result.kind, subject: result.subject, ...values })
+      .onConflictDoUpdate({ target: [providerResults.provider, providerResults.kind, providerResults.subject], set: values });
+  }
+
+  async deleteExpired(now = new Date()): Promise<number> {
+    const rows = await this.db
+      .delete(providerResults)
+      .where(lt(providerResults.expiresAt, now))
+      .returning({ id: providerResults.id });
     return rows.length;
   }
 }

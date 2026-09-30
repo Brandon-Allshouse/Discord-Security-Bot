@@ -7,10 +7,12 @@ packages:
 onlyBuiltDependencies:
   - esbuild
 
-# Blocked on purpose. They come in through Testcontainers (tests only) and build
-# optional native speedups we don't need. Listing them keeps installs quiet.
+# Blocked on purpose. They build optional native speedups we don't need
+# (Testcontainers, tests only; msgpackr via BullMQ, which falls back to plain JS).
+# Listing them keeps installs quiet.
 ignoredBuiltDependencies:
   - cpu-features
+  - msgpackr-extract
   - protobufjs
   - ssh2
 

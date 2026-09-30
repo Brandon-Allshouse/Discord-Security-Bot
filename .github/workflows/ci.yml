@@ -50,3 +50,4 @@ jobs:
           persist-credentials: false
       - run: docker build -f apps/bot/Dockerfile -t equinox-bot:ci .
       - run: docker build -f apps/dashboard/Dockerfile -t equinox-dashboard:ci .
+      - run: docker build -f apps/worker/Dockerfile -t equinox-worker:ci .

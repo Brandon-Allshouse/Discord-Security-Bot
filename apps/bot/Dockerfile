@@ -9,6 +9,7 @@ WORKDIR /repo
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc turbo.json tsconfig.base.json ./
 COPY apps/bot/package.json apps/bot/
 COPY apps/dashboard/package.json apps/dashboard/
+COPY apps/worker/package.json apps/worker/
 COPY packages/config/package.json packages/config/
 COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/

@@ -1,3 +1,4 @@
+import { combineWeights } from '../verdict.js';
 import { domainCandidates, type NormalizedUrl } from './normalize.js';
 
 interface Brand {
@@ -156,7 +157,8 @@ export function editDistance(a: string, b: string, max = 3): number {
   return d[a.length]![b.length]!;
 }
 
-function isOfficialOrSafe(url: NormalizedUrl): boolean {
+/** The brand's own domains and popular sites. Never scored, and never sent to outside intel sources. */
+export function isKnownSafe(url: Pick<NormalizedUrl, 'host' | 'domain'>): boolean {
   const candidates = domainCandidates(url);
   if (candidates.some((c) => SAFE_DOMAINS.has(c))) return true;
   return BRANDS.some((brand) => brand.official.some((official) => candidates.includes(official)));
@@ -167,18 +169,13 @@ export interface LinkAssessment {
   reasons: string[];
 }
 
-/** Noisy-OR: independent weak signals add up, but never past 1. */
-function combine(weights: number[]): number {
-  return 1 - weights.reduce((acc, w) => acc * (1 - w), 1);
-}
-
 /**
  * Scores one normalized URL (0..1) using only local information.
  * Tuned so a single weak signal stays below "suspicious" (0.5):
  * false positives are worse than misses.
  */
 export function assessUrl(url: NormalizedUrl, messageText = ''): LinkAssessment {
-  if (isOfficialOrSafe(url)) return { score: 0, reasons: [] };
+  if (isKnownSafe(url)) return { score: 0, reasons: [] };
 
   const weights: number[] = [];
   const reasons: string[] = [];
@@ -241,5 +238,5 @@ export function assessUrl(url: NormalizedUrl, messageText = ''): LinkAssessment 
   const phrases = SCAM_PHRASES.filter(({ pattern }) => pattern.test(messageText));
   if (phrases.length > 0) add(Math.min(0.25 + 0.1 * (phrases.length - 1), 0.45), phrases.map((p) => p.reason).join('; '));
 
-  return { score: Number(combine(weights).toFixed(3)), reasons };
+  return { score: Number(combineWeights(weights).toFixed(3)), reasons };
 }

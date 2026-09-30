@@ -7,9 +7,10 @@ import { DiscordActionExecutor } from './executor.js';
 function fakeDiscord({ sendable = true } = {}) {
   const member = { roles: { add: vi.fn(), remove: vi.fn() }, timeout: vi.fn() };
   const channel = {
+    id: '300000000000000002',
     isSendable: () => sendable,
     isTextBased: () => true,
-    send: vi.fn(),
+    send: vi.fn(() => Promise.resolve({ id: '700000000000000001' })),
     messages: { delete: vi.fn() },
   };
   const guild = {
@@ -36,14 +37,14 @@ const detection: Detection = {
 };
 
 describe('DiscordActionExecutor.execute', () => {
-  it('posts alerts that cannot ping anyone', async () => {
+  it('posts alerts that cannot ping anyone, and remembers which message it posted', async () => {
     const d = fakeDiscord();
     const outcome = await new DiscordActionExecutor(d.client).execute('alert', {
       guild: makeGuild(),
       detection,
       previous: [],
     });
-    expect(outcome).toEqual({ action: 'alert', ok: true });
+    expect(outcome).toEqual({ action: 'alert', ok: true, ref: { channelId: '300000000000000002', messageId: '700000000000000001' } });
     expect(d.channel.send).toHaveBeenCalledWith(expect.objectContaining({ allowedMentions: { parse: [] } }));
   });
 

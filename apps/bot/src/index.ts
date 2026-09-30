@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { ShardingManager } from 'discord.js';
 import { Redis } from 'ioredis';
 import { loadConfig } from '@equinox/config';
+import { BOT_SHARD_COUNT_KEY } from '@equinox/core';
 import { createDb, runMigrations, SystemStore } from '@equinox/db';
 import { seedBlocklist } from './indicators.js';
 import { createLogger } from './logger.js';
@@ -51,8 +52,21 @@ async function main() {
   });
   manager.on('shardCreate', (shard) => logger.info({ shard: shard.id }, 'shard launched'));
   await manager.spawn();
+  await publishShardCount(config.REDIS_URL, manager.totalShards === 'auto' ? 1 : manager.totalShards);
 
   startRetentionJob(config.DATABASE_URL);
+}
+
+/** Tells the dashboard how many shards there are, so it can send each request to the right one. */
+async function publishShardCount(url: string, count: number) {
+  const redis = new Redis(url, { maxRetriesPerRequest: 2, lazyConnect: true });
+  try {
+    await redis.connect();
+    await redis.set(BOT_SHARD_COUNT_KEY, String(count));
+    logger.info({ shards: count }, 'shard count published');
+  } finally {
+    redis.disconnect();
+  }
 }
 
 /** Every hour, delete detections past their expiry so we don't keep data longer than we said we would. */

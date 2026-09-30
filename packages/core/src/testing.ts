@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { IntelSummary } from './intel/types.js';
 import type { AuditEntry, PipelineDeps } from './ports.js';
 import type { ActionKind, ActionOutcome, Detection, DetectionStatus, GuildSettings, Signal } from './types.js';
 
@@ -7,11 +8,14 @@ export function createFakeDeps(guilds: GuildSettings[] = []) {
   const guildMap = new Map(guilds.map((guild) => [guild.id, guild]));
   const detections = new Map<string, Detection>();
   const audit: AuditEntry[] = [];
-  const executed: { action: ActionKind; detectionId: string }[] = [];
+  const executed: { action: ActionKind; detectionId: string; escalatedFrom?: string }[] = [];
   const reverted: { action: ActionKind; detectionId: string }[] = [];
   const allowlist = new Set<string>();
   const blocklist = new Set<string>();
   const failing = new Set<ActionKind>();
+  /** Cached intel by subject. Set `intelDown.value` to make the intel cache throw. */
+  const intel = new Map<string, IntelSummary>();
+  const intelDown = { value: false };
 
   const deps: PipelineDeps = {
     guilds: { get: (id) => Promise.resolve(guildMap.get(id) ?? null) },
@@ -51,6 +55,21 @@ export function createFakeDeps(guilds: GuildSettings[] = []) {
         if (detection && detection.guildId === guildId) detection.status = status;
         return Promise.resolve();
       },
+      findForMessage: (guildId, messageId, subject) => {
+        const found = [...detections.values()].find(
+          (d) => d.guildId === guildId && d.messageId === messageId && d.subject === subject,
+        );
+        return Promise.resolve(found ? { ...found } : null);
+      },
+      updateVerdict: (guildId, id, verdict) => {
+        const detection = detections.get(id);
+        if (detection && detection.guildId === guildId) detection.verdict = verdict;
+        return Promise.resolve();
+      },
+    },
+    intel: {
+      summaryFor: (signal: Signal) =>
+        intelDown.value ? Promise.reject(new Error('redis down')) : Promise.resolve(intel.get(signal.subject) ?? null),
     },
     audit: {
       write: (entry) => {
@@ -59,9 +78,9 @@ export function createFakeDeps(guilds: GuildSettings[] = []) {
       },
     },
     executor: {
-      execute: (action, { detection }) => {
+      execute: (action, { detection, escalatedFrom }) => {
         if (failing.has(action)) return Promise.reject(new Error('boom: internal detail'));
-        executed.push({ action, detectionId: detection.id });
+        executed.push({ action, detectionId: detection.id, ...(escalatedFrom ? { escalatedFrom } : {}) });
         return Promise.resolve({ action, ok: true });
       },
       revert: (action, _guild, detection) => {
@@ -71,7 +90,7 @@ export function createFakeDeps(guilds: GuildSettings[] = []) {
     },
   };
 
-  return { deps, detections, audit, executed, reverted, allowlist, blocklist, failing, guildMap };
+  return { deps, detections, audit, executed, reverted, allowlist, blocklist, failing, guildMap, intel, intelDown };
 }
 
 export function makeGuild(overrides: Partial<GuildSettings> = {}): GuildSettings {

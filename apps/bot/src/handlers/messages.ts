@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Message } from 'discord.js';
-import { findLinks, processSignal } from '@equinox/core';
+import { findLinks, isKnownSafe, processSignal } from '@equinox/core';
 import type { BotContext } from '../context.js';
 
 /**
@@ -26,6 +26,8 @@ export class SeenEdits {
 /**
  * Link detector: every link in a message becomes a url Signal and goes through the pipeline.
  * Stops at the first detection, since the message is handled (and maybe deleted) by then.
+ * Links nothing is known about yet are handed to the intel worker; if its answer makes the
+ * verdict worse, the message goes through the pipeline again (see intel.ts).
  */
 export async function scanMessage(message: Message, ctx: BotContext): Promise<void> {
   if (!message.inGuild() || !message.content) return;
@@ -49,6 +51,21 @@ export async function scanMessage(message: Message, ctx: BotContext): Promise<vo
       ctx.deps,
     );
     if (result.status === 'ignored') return;
+    // The brands' own domains and popular sites are never sent for lookups.
+    if (result.needsIntel && !isKnownSafe(finding.normalized)) {
+      await ctx.intel
+        .request(finding.normalized.url, {
+          guildId: message.guildId,
+          userId: message.author.id,
+          channelId: message.channelId,
+          messageId: message.id,
+          heuristicScore: finding.score,
+          reasons: finding.reasons,
+        })
+        .catch((err: unknown) =>
+          ctx.logger.warn({ err: { message: err instanceof Error ? err.message : 'unknown' } }, 'could not queue intel lookup'),
+        );
+    }
     if (result.status === 'detected') {
       ctx.logger.info(
         { guildId: message.guildId, detectionId: result.detection.id, level: result.verdict.level },

@@ -27,7 +27,14 @@ export type ReviewResult =
  * - confirm: keep actions, mark confirmed (feeds the network from M5)
  */
 export async function reviewDetection(
-  input: { guildId: string; detectionId: string; decision: ReviewDecision; actorId: string },
+  input: {
+    guildId: string;
+    detectionId: string;
+    decision: ReviewDecision;
+    actorId: string;
+    /** Where the decision was made, for the audit log. */
+    via?: 'discord' | 'dashboard';
+  },
   deps: Pick<PipelineDeps, 'guilds' | 'detections' | 'audit' | 'executor'>,
 ): Promise<ReviewResult> {
   const [guild, detection] = await Promise.all([
@@ -56,7 +63,7 @@ export async function reviewDetection(
     actor: input.actorId,
     action: `review.${input.decision}`,
     target: detection.userId,
-    details: { detectionId: detection.id, reverted },
+    details: { detectionId: detection.id, reverted, via: input.via ?? 'discord' },
   });
 
   return { status: 'done', detection: { ...detection, status }, reverted };

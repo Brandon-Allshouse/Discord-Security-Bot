@@ -61,6 +61,8 @@ export interface ActionOutcome {
   ok: boolean;
   /** Safe, human-readable detail. Never raw error objects or stack traces. */
   detail?: string;
+  /** For alerts: the message that was posted, so it can be updated when the detection is resolved elsewhere. */
+  ref?: { channelId: string; messageId: string };
 }
 
 export interface Detection {

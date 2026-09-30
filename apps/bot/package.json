@@ -15,6 +15,7 @@
     "@equinox/config": "workspace:*",
     "@equinox/core": "workspace:*",
     "@equinox/db": "workspace:*",
+    "bullmq": "6.3.9",
     "discord.js": "14.27.0",
     "ioredis": "6.0.0",
     "pino": "10.3.1"
