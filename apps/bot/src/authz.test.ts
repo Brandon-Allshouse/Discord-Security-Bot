@@ -1,6 +1,6 @@
 import { ApplicationCommandOptionType } from 'discord.js';
 import { describe, expect, it } from 'vitest';
-import { COMMAND_ACCESS, isAuthorized, parseDomainInput, requiredAccess } from './authz.js';
+import { COMMAND_ACCESS, isAuthorized, requiredAccess } from './authz.js';
 import { commandDefinitions } from './commands.js';
 
 const admin = { hasManageGuild: true, roleIds: [] };
@@ -40,31 +40,5 @@ describe('isAuthorized', () => {
 
   it('denies mods when no mod role is configured', () => {
     expect(isAuthorized('mod', mod, [])).toBe(false);
-  });
-});
-
-describe('parseDomainInput', () => {
-  it.each([
-    ['example.com', 'example.com'],
-    ['  Example.COM  ', 'example.com'],
-    ['sub.example.co.uk', 'sub.example.co.uk'],
-    ['example.com.', 'example.com'],
-    ['bücher.de', 'xn--bcher-kva.de'],
-  ])('accepts %s', (input, expected) => {
-    expect(parseDomainInput(input)).toBe(expected);
-  });
-
-  it.each([
-    '',
-    'https://example.com',
-    'example.com/path',
-    'example',
-    '192.168.0.1',
-    'exa mple.com',
-    'example.com;drop table',
-    '<script>.com',
-    `${'a'.repeat(250)}.com`,
-  ])('rejects %s', (input) => {
-    expect(parseDomainInput(input)).toBeNull();
   });
 });

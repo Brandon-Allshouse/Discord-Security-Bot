@@ -1,4 +1,4 @@
-import { canModerate, normalizeUrl } from '@equinox/core';
+import { canModerate } from '@equinox/core';
 
 /**
  * Who may run what, inside one tenant (Discord server).
@@ -30,14 +30,4 @@ export interface MemberAccess {
 
 export function isAuthorized(level: AccessLevel, member: MemberAccess, modRoleIds: readonly string[]): boolean {
   return level === 'admin' ? member.hasManageGuild : canModerate(member, modRoleIds);
-}
-
-/** Validates a domain typed by a user. Returns the lowercase ASCII host, or null. */
-export function parseDomainInput(input: string): string | null {
-  const trimmed = input.trim().toLowerCase().replace(/\.$/, '');
-  if (trimmed.length === 0 || trimmed.length > 253) return null;
-  if (!/^[\p{L}\p{N}.-]+$/u.test(trimmed)) return null;
-  const normalized = normalizeUrl(`http://${trimmed}`);
-  if (!normalized?.domain || normalized.isIp) return null;
-  return normalized.host;
 }

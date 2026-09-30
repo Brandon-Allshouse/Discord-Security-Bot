@@ -148,6 +148,19 @@ export class DetectionStore implements DetectionRepository {
     );
   }
 
+  /** Newest first, for the dashboard. */
+  async recent(guildId: string, limit = 50): Promise<Detection[]> {
+    return asTenant(this.db, guildId, async (tx) => {
+      const rows = await tx
+        .select()
+        .from(detections)
+        .where(eq(detections.guildId, guildId))
+        .orderBy(desc(detections.createdAt))
+        .limit(Math.max(1, Math.min(limit, 100)));
+      return rows.map(toDetection);
+    });
+  }
+
   async countOpen(guildId: string): Promise<number> {
     return asTenant(this.db, guildId, async (tx) => {
       const [row] = await tx

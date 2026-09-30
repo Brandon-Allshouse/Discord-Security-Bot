@@ -14,10 +14,10 @@ COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/
 RUN pnpm install --frozen-lockfile
 
-COPY apps/bot apps/bot
+COPY apps/dashboard apps/dashboard
 COPY packages packages
-RUN pnpm turbo run build --filter @equinox/bot...
-RUN pnpm --filter @equinox/bot deploy --prod --legacy /out
+RUN pnpm turbo run build --filter @equinox/dashboard...
+RUN pnpm --filter @equinox/dashboard deploy --prod --legacy /out
 
 # ---- runtime: no build tools, no package manager, non-root, read-only friendly ----
 FROM node:22-alpine AS runtime
@@ -25,4 +25,5 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build --chown=root:root /out ./
 USER node
+EXPOSE 3000
 CMD ["node", "dist/index.js"]

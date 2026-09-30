@@ -55,6 +55,16 @@ export function normalizeUrl(raw: string): NormalizedUrl | null {
   };
 }
 
+/** Validates a domain typed by a user. Returns the lowercase ASCII host, or null. */
+export function parseDomainInput(input: string): string | null {
+  const trimmed = input.trim().toLowerCase().replace(/\.$/, '');
+  if (trimmed.length === 0 || trimmed.length > 253) return null;
+  if (!/^[\p{L}\p{N}.-]+$/u.test(trimmed)) return null;
+  const normalized = normalizeUrl(`http://${trimmed}`);
+  if (!normalized?.domain || normalized.isIp) return null;
+  return normalized.host;
+}
+
 /** The host and each parent domain down to the registrable domain, for allowlist/blocklist matching. */
 export function domainCandidates(normalized: Pick<NormalizedUrl, 'host' | 'domain'>): string[] {
   const { host, domain } = normalized;

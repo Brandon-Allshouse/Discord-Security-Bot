@@ -14,6 +14,7 @@ import {
   findLinks,
   GUILD_MODES,
   normalizeUrl,
+  parseDomainInput,
   processSignal,
   reviewDetection,
   slash,
@@ -23,7 +24,7 @@ import {
   type GuildSettings,
 } from '@equinox/core';
 import { parseReviewCustomId, resolvedAlertEmbed } from '../alerts.js';
-import { isAuthorized, parseDomainInput, requiredAccess, type MemberAccess } from '../authz.js';
+import { isAuthorized, requiredAccess, type MemberAccess } from '../authz.js';
 import type { BotContext } from '../context.js';
 import { canPostAlerts, missingGuildPermissions } from '../permissions.js';
 

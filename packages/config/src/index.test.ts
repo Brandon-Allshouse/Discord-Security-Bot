@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig } from './index.js';
+import { loadConfig, loadDashboardConfig } from './index.js';
 
 const valid = {
   DISCORD_TOKEN: 'x'.repeat(70),
@@ -42,5 +42,39 @@ describe('loadConfig', () => {
     expect(() =>
       loadConfig({ ...valid, NODE_ENV: 'production', DEV_GUILD_ID: '123456789012345678' }),
     ).toThrow(/DEV_GUILD_ID/);
+  });
+});
+
+describe('loadDashboardConfig', () => {
+  const dashboard = {
+    DISCORD_CLIENT_ID: valid.DISCORD_CLIENT_ID,
+    DISCORD_CLIENT_SECRET: 's'.repeat(32),
+    DATABASE_URL: valid.DATABASE_URL,
+    REDIS_URL: valid.REDIS_URL,
+  };
+
+  it('defaults to a local address and does not need the bot token', () => {
+    const config = loadDashboardConfig(dashboard);
+    expect(config).toMatchObject({ DASHBOARD_URL: 'http://localhost:3000', DASHBOARD_HOST: '127.0.0.1', DASHBOARD_PORT: 3000 });
+  });
+
+  it('rejects a missing client secret without echoing values', () => {
+    expect(() => loadDashboardConfig({ ...dashboard, DISCORD_CLIENT_SECRET: 'tiny-value' })).toThrow(/DISCORD_CLIENT_SECRET/);
+    try {
+      loadDashboardConfig({ ...dashboard, DISCORD_CLIENT_SECRET: 'tiny-value' });
+    } catch (error) {
+      expect(String(error)).not.toContain('tiny-value');
+    }
+  });
+
+  it('requires https in production', () => {
+    expect(() => loadDashboardConfig({ ...dashboard, NODE_ENV: 'production' })).toThrow(/DASHBOARD_URL/);
+    expect(loadDashboardConfig({ ...dashboard, NODE_ENV: 'production', DASHBOARD_URL: 'https://app.example' }).DASHBOARD_URL).toBe(
+      'https://app.example',
+    );
+  });
+
+  it('rejects a bad port', () => {
+    expect(() => loadDashboardConfig({ ...dashboard, DASHBOARD_PORT: '99999' })).toThrow(/DASHBOARD_PORT/);
   });
 });

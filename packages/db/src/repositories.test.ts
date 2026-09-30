@@ -131,6 +131,15 @@ describe('tenant isolation (row-level security)', () => {
     expect(auditVisible.every((r) => r.guildId === TENANT_A)).toBe(true);
   });
 
+  it('recent detections list only the tenant’s own, newest first', async () => {
+    const rows = await stores.detections.recent(TENANT_A);
+    expect(rows.some((r) => r.id === detectionA)).toBe(true);
+    expect(rows.every((r) => r.guildId === TENANT_A)).toBe(true);
+    const times = rows.map((r) => r.createdAt.getTime());
+    expect(times).toEqual([...times].sort((a, b) => b - a));
+    expect(await stores.detections.recent(TENANT_A, 1)).toHaveLength(1);
+  });
+
   it('cannot read another tenant’s detection by ID', async () => {
     expect(await stores.detections.get(TENANT_A, detectionB)).toBeNull();
     const rows = await asTenant(handle.db, TENANT_A, (tx) =>

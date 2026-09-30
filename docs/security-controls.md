@@ -26,7 +26,7 @@ Each Discord server is a tenant. One server's data should never show up in anoth
 | The tenant role can't delete detections or change the audit log, on top of the trigger that also blocks it | 800-53 AU-9, AC-6 | grants in migration 0002 | ✅ |
 | Jobs that span tenants live in one small class that never hands tenant data back | 800-53 AC-6 | `SystemStore` | ✅ |
 | Each tenant has its own mode, roles and allowlist; a false-positive call only affects the server that made it | Keeps false alarms local | `guilds`, `guild_allowlist`, button handler | ✅ |
-| Only indicators cross tenants, never content or server identities | 800-53 PT-2, AC-21 | Redis blocklist holds domains only | ✅ · ⏳ network scoring in M4 |
+| Only indicators cross tenants, never content or server identities | 800-53 PT-2, AC-21 | Redis blocklist holds domains only | ✅ · ⏳ network scoring in M5 |
 | Separate login role for the app, distinct from the migration owner | 800-53 AC-6 | — | ⏳ M9 |
 
 ## Access control
@@ -42,6 +42,27 @@ Each Discord server is a tenant. One server's data should never show up in anoth
 | Slash commands are hidden from non-admins and don't work in DMs | 800-53 AC-6 | `commands.ts` | ✅ |
 | `/equinox check` is mods-only so attackers can't use it to test the blocklist | 800-53 SI-4 | `interactions.ts` | ✅ |
 
+## Dashboard
+
+The web dashboard (`apps/dashboard`) is a separate process from the bot. It reads and writes tenant data through the same row-level-security stores.
+
+| Control | Standard | Where | Status |
+|---|---|---|---|
+| Login is Discord OAuth2 (authorization code) with a random `state` bound to the browser by an HttpOnly cookie and compared in constant time | 800-53 IA-2, IA-8 · ASVS V10 | `app.ts` (`/auth/login`, `/auth/callback`), tests `rejects a callback with…` | ✅ |
+| A login always starts on the public address (`DASHBOARD_URL`), so the state and session cookies belong to one host name | ASVS V3 | `/auth/login`, test `moves a login started under another host name…` | ✅ |
+| Only `identify` and `guilds` are requested, and the access token is revoked right after login instead of being stored | 800-53 AC-6 · ASVS V14 | `DiscordOAuthClient.login` | ✅ |
+| A tenant page needs Manage Server (or owner/Administrator) in that server, checked on every request. Other tenants and unknown IDs both answer 404. | 800-53 AC-3 · ASVS V8 · Top 10: Broken Access Control | `tenantFor`, `canManage`, tests in `app.test.ts` → `tenant access` | ✅ |
+| Sessions are random 256-bit IDs in Redis, stored under their SHA-256 hash, expire after an hour, and are replaced at every login | 800-53 SC-23, AC-12 · ASVS V7 | `sessions.ts` | ✅ |
+| Session and state cookies are HttpOnly and SameSite=Lax, and Secure whenever the dashboard is served over https; production refuses to start on plain http | ASVS V3 · 800-53 SC-8 | `cookieOptions`, `loadDashboardConfig` | ✅ |
+| Every form carries a per-session CSRF token, compared in constant time | ASVS V3 · 800-53 SC-23 | `csrfOk`, test `rejects forms without the CSRF token` | ✅ |
+| All page output goes through an auto-escaping template | ASVS V1 (output encoding) · Top 10: Injection | `html.ts`, test `escapes names and subjects that contain markup` | ✅ |
+| Strict Content-Security-Policy (no scripts at all), no framing, no sniffing, no referrer, no caching; HSTS over https | ASVS V3 · Top 10: Security Misconfiguration | `onSend` hook in `app.ts` | ✅ |
+| Query strings are never echoed; page messages come from a fixed table | ASVS V1 | `NOTICES`, `ERRORS`, test `never reflects the query string` | ✅ |
+| Requests are rate-limited per address (120 a minute, 10 a minute for login) | ASVS V2 (anti-automation) · 800-53 SC-5 | `limits` in `app.ts` | ✅ in memory · ⏳ shared limiter and proxy-aware addresses in M9 |
+| Request logs record the route pattern, never the URL, so login codes and IDs stay out of the logs. A rejected login logs which check failed, never the values. | 800-53 AU-3 · ASVS V16 | `onResponse` hook, `/auth/callback` | ✅ |
+| Settings and allowlist changes made on the web land in the tenant's audit log, marked `via: dashboard` | 800-53 AU-2, AU-12 | `app.ts`, tests in `settings changes` | ✅ |
+| Permissions are re-checked against Discord during a session, not only at login | 800-53 AC-2 | — | 🟡 bounded by the one-hour session · ⏳ M9 |
+
 ## Input validation and injection
 
 | Control | Standard | Where | Status |
@@ -54,8 +75,8 @@ Each Discord server is a tenant. One server's data should never show up in anoth
 | Bad links are defanged in alerts so nobody clicks them by accident | Alerts shouldn't spread the threat | `defang` in `display.ts` | ✅ |
 | Work per message is capped (10 links, 8,000 characters) | 800-53 SC-5 | `extract.ts` | ✅ |
 | Commands and buttons are rate-limited to 10 a minute per user | ASVS V2 (anti-automation) | `RateLimiter`, `context.ts` | ✅ |
-| Domains typed into `/equinox allow` are validated first | ASVS V2 | `parseDomainInput` | ✅ |
-| SSRF protection for following redirects | ASVS V1 · Top 10: Server-Side Request Forgery | — | ⏳ M3 |
+| Domains typed into `/equinox allow` or the dashboard are validated first | ASVS V2 | `parseDomainInput` in `packages/core` | ✅ |
+| SSRF protection for following redirects | ASVS V1 · Top 10: Server-Side Request Forgery | — | ⏳ M4 |
 
 ## Audit and logging
 
@@ -78,7 +99,8 @@ Each Discord server is a tenant. One server's data should never show up in anoth
 | Config is checked at startup; the bot won't start with bad config, and errors never print secret values | 800-53 CM-6 · ASVS V13 | `packages/config`, tests | ✅ |
 | `DEV_GUILD_ID` isn't allowed in production | 800-53 CM-6 | `loadConfig` | ✅ |
 | Postgres and Redis need passwords and only listen on 127.0.0.1 | 800-53 CM-7, SC-7 · Top 10: Security Misconfiguration | `docker-compose.yml` | ✅ |
-| The container runs as a non-root user on a read-only filesystem, with all capabilities dropped and no privilege escalation | 800-53 CM-7, AC-6 | `apps/bot/Dockerfile`, `docker-compose.yml` | ✅ |
+| Containers run as a non-root user on a read-only filesystem, with all capabilities dropped and no privilege escalation | 800-53 CM-7, AC-6 | `apps/bot/Dockerfile`, `apps/dashboard/Dockerfile`, `docker-compose.yml` | ✅ |
+| The dashboard container gets the OAuth client secret but never the bot token | 800-53 AC-6 | `dashboardConfigSchema`, `docker-compose.yml` | ✅ |
 | TLS to Postgres/Redis in production (`sslmode`, `rediss://`) | 800-53 SC-8 · ASVS V12 | `rediss:` accepted by config | 🟡 supported, not required yet |
 
 ## Supply chain and how we build
@@ -117,4 +139,4 @@ Each Discord server is a tenant. One server's data should never show up in anoth
 | A false alarm is worse than a miss; new servers start in `alert_only` | The database default and `register()`; heuristics tuned so no single weak signal counts as suspicious; a 122-case test suite of real scams and real sites | ✅ |
 | Kicks and bans are never automatic | Tests over every row of the policy table | ✅ |
 | Everything can be undone | `reviewDetection` reverses quarantine, timeout and ban; a false positive allowlists the exact host | ✅, except deleted messages, which Discord can't bring back |
-| Victims are victims | Hijacked accounts get quarantined, not banned | ✅ policy · ⏳ detector in M6 |
+| Victims are victims | Hijacked accounts get quarantined, not banned | ✅ policy · ⏳ detector in M7 |

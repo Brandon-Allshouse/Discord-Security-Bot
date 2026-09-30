@@ -1,6 +1,6 @@
 import { PermissionFlagsBits, type Guild, type GuildTextBasedChannel } from 'discord.js';
 
-/** Only what the current features actually use. Kick and Ban get added with raid handling (M7). */
+/** Only what the current features actually use. Kick and Ban get added with raid handling (M8). */
 export const REQUIRED_GUILD_PERMISSIONS = {
   ViewChannel: PermissionFlagsBits.ViewChannel,
   SendMessages: PermissionFlagsBits.SendMessages,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { defang, truncate } from './display.js';
 import { safeErrorMessage } from './errors.js';
+import { parseDomainInput } from './links/normalize.js';
 import { RateLimiter } from './rate-limit.js';
 
 describe('RateLimiter', () => {
@@ -23,6 +24,32 @@ describe('display helpers', () => {
   it('truncates without splitting emoji', () => {
     expect(truncate('ab😀cd', 4)).toBe('ab😀…');
     expect(truncate('short', 10)).toBe('short');
+  });
+});
+
+describe('parseDomainInput', () => {
+  it.each([
+    ['example.com', 'example.com'],
+    ['  Example.COM  ', 'example.com'],
+    ['sub.example.co.uk', 'sub.example.co.uk'],
+    ['example.com.', 'example.com'],
+    ['bücher.de', 'xn--bcher-kva.de'],
+  ])('accepts %s', (input, expected) => {
+    expect(parseDomainInput(input)).toBe(expected);
+  });
+
+  it.each([
+    '',
+    'https://example.com',
+    'example.com/path',
+    'example',
+    '192.168.0.1',
+    'exa mple.com',
+    'example.com;drop table',
+    '<script>.com',
+    `${'a'.repeat(250)}.com`,
+  ])('rejects %s', (input) => {
+    expect(parseDomainInput(input)).toBeNull();
   });
 });
 

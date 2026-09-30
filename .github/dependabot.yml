@@ -52,7 +52,9 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker
-    directory: /apps/bot
+    directories:
+      - /apps/bot
+      - /apps/dashboard
     schedule:
       interval: weekly
       day: monday

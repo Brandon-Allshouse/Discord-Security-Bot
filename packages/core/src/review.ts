@@ -24,7 +24,7 @@ export type ReviewResult =
  * canModerate first.
  *
  * - restore / false_positive: undo every reversible action that succeeded
- * - confirm: keep actions, mark confirmed (feeds the network from M4)
+ * - confirm: keep actions, mark confirmed (feeds the network from M5)
  */
 export async function reviewDetection(
   input: { guildId: string; detectionId: string; decision: ReviewDecision; actorId: string },
