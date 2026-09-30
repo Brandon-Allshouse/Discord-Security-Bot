@@ -96,7 +96,7 @@ Lookups try the cheap options first and stop as soon as they're confident: the l
 
 ## Tech stack
 
-TypeScript on Node 22 (strict mode) across the board, with:
+TypeScript (strict mode) across the board, on Node 22 in production. CI also tests every change on Node 24, the next LTS. With:
 
 - discord.js v14 for Discord
 - PostgreSQL 16 with Drizzle ORM
@@ -129,7 +129,7 @@ docs/          User guides (getting started, link protection, threat intel, dash
 
 ## Getting started
 
-You'll need Node 22, pnpm 10 and Docker. On Windows, also Git Bash (it comes with [Git for Windows](https://git-scm.com/download/win)): the `openssl` commands below run there. PowerShell and Command Prompt don't have `openssl`.
+You'll need Node 22 (or 24), pnpm 10 and Docker. On Windows, also Git Bash (it comes with [Git for Windows](https://git-scm.com/download/win)): the `openssl` commands below run there. PowerShell and Command Prompt don't have `openssl`.
 
 1. Create an application in the [Discord developer portal](https://discord.com/developers/applications). On the **Bot** page, turn on the **Message Content** intent and copy the token.
 2. Copy the example config:

@@ -12,7 +12,7 @@ How to work on Equinox: running the parts, testing, database changes, and what e
 
 ## Setup
 
-You need Node 22, pnpm 10 and Docker. On Windows, also Git Bash (for `openssl` and the shell snippets in these docs); run `pnpm` from PowerShell or a terminal where Node is on the PATH.
+You need Node 22 or 24, pnpm 10 and Docker. Production and the Docker images use Node 22; CI runs every check on both. On Windows, also Git Bash (for `openssl` and the shell snippets in these docs); run `pnpm` from PowerShell or a terminal where Node is on the PATH.
 
 ```bash
 cp .env.example .env      # then fill it in (see the README)

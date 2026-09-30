@@ -205,6 +205,7 @@ The controls below apply to the dashboard and the API together; each says where 
 | Install scripts are blocked unless a package is explicitly allowed | SSDF PW.4 · Top 10: Software Supply Chain Failures | `onlyBuiltDependencies` / `ignoredBuiltDependencies` in `pnpm-workspace.yaml` | ✅ |
 | Package versions less than 3 days old aren't installed | SSDF PW.4 | `minimumReleaseAge` | ✅ |
 | CI runs `pnpm audit` and fails on high or critical issues | SSDF RV.1 · 800-53 RA-5 | `ci.yml` | ✅ |
+| CI runs every check on Node 22 (production) and Node 24 (next LTS), so a runtime upgrade is never a surprise; `engines` allows exactly those two | SSDF PW.8 · 800-53 SI-2 | `matrix` in `ci.yml`, `engines` in `package.json` | ✅ |
 | Known-vulnerable transitive dependencies, dev tools included, are forced to patched versions; a full `pnpm audit` (dev included) is clean | SSDF RV.1, PW.4 · 800-53 SI-2 | `overrides` in `pnpm-workspace.yaml` (esbuild under drizzle-kit, GHSA-67mh-4wv8-2f99) | ✅ |
 | Dependabot updates npm packages, Actions, the Docker base image and Compose images, waiting 3 days on new releases to match pnpm | SSDF RV.1 · 800-53 SI-2 | `.github/dependabot.yml` | ✅ |
 | The CI token is read-only and checkout doesn't keep credentials around | SSDF PO.5 | `ci.yml` | ✅ |
