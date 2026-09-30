@@ -1,0 +1,19 @@
+# Seed blocklist: registrable domains that are confirmed malicious.
+# One domain per line. Loaded into Redis at startup (SADD, idempotent).
+#
+# Keep this list small and certain: a wrong entry blocks a real site in every server.
+# From M3, feeds (URLhaus etc.) and network confirmations take over.
+#
+# Classic Discord/Steam lookalikes:
+dlscord.gift
+dlscord.com
+discorcl.com
+d1scord.com
+steamcommunlty.com
+stearncommunity.com
+steamcomnunity.com
+
+# Safe test link. Not a real scam: .invalid is reserved and never resolves, so it's
+# fine to post in a live server. Post https://equinox-test.invalid/anything to trigger
+# a detection without Discord's own filters flagging your account.
+equinox-test.invalid

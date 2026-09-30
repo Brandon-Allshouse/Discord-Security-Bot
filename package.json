@@ -1,0 +1,27 @@
+{
+  "name": "equinox",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.6",
+  "engines": {
+    "node": ">=22.12 <23"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "eslint .",
+    "test": "turbo run test",
+    "dev:bot": "pnpm --filter @equinox/bot dev",
+    "db:generate": "pnpm --filter @equinox/db generate",
+    "db:migrate": "pnpm --filter @equinox/db migrate",
+    "audit:deps": "pnpm audit --prod --audit-level high"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "eslint": "10.11.0",
+    "turbo": "2.11.4",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.1",
+    "vitest": "5.0.2"
+  }
+}

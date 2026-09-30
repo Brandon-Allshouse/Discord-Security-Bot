@@ -1,0 +1,29 @@
+{
+  "name": "@equinox/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist", "drizzle"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "generate": "drizzle-kit generate",
+    "migrate": "node dist/migrate-cli.js"
+  },
+  "dependencies": {
+    "@equinox/core": "workspace:*",
+    "drizzle-orm": "0.45.3",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "12.1.0",
+    "drizzle-kit": "0.31.11"
+  }
+}

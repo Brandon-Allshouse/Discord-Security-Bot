@@ -1,0 +1,19 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Install scripts are a common way for malicious packages to get in, so they're
+# blocked unless a package is listed here.
+onlyBuiltDependencies:
+  - esbuild
+
+# Blocked on purpose. They come in through Testcontainers (tests only) and build
+# optional native speedups we don't need. Listing them keeps installs quiet.
+ignoredBuiltDependencies:
+  - cpu-features
+  - protobufjs
+  - ssh2
+
+# Don't install anything published in the last 3 days. Hijacked releases usually
+# get caught and pulled within that window.
+minimumReleaseAge: 4320

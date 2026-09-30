@@ -1,0 +1,84 @@
+version: 2
+
+# Notes on the rules below:
+# - cooldown has to be at least 3 days. pnpm refuses anything newer than that
+#   (minimumReleaseAge in pnpm-workspace.yaml), so a fresher bump would fail to install.
+# - Minor and patch updates are grouped into one PR per ecosystem. Majors come in
+#   their own PRs so they get a proper look.
+# - Some majors are held back on purpose; each one says why.
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+      semver-major-days: 14
+    open-pull-requests-limit: 10
+    versioning-strategy: increase
+    labels: [dependencies]
+    commit-message:
+      prefix: deps
+      prefix-development: deps-dev
+    groups:
+      production:
+        dependency-type: production
+        update-types: [minor, patch]
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
+    ignore:
+      # Types have to match the Node version we run (22). Bump with the runtime.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
+      # typescript-eslint supports TypeScript < 6.1. Lift this once it does.
+      - dependency-name: typescript
+        versions: [">=6.1.0"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    labels: [dependencies]
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /apps/bot
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    labels: [dependencies]
+    commit-message:
+      prefix: deps
+    ignore:
+      # Stay on Node 22 until we move engines, CI and the image together.
+      - dependency-name: node
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    labels: [dependencies]
+    commit-message:
+      prefix: deps
+    ignore:
+      # Major database upgrades need a data migration, so we do them by hand.
+      - dependency-name: postgres
+        update-types: [version-update:semver-major]
+      - dependency-name: redis
+        update-types: [version-update:semver-major]
