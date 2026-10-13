@@ -23,7 +23,7 @@
     "postgres": "3.4.9"
   },
   "devDependencies": {
-    "@testcontainers/postgresql": "12.1.0",
+    "@testcontainers/postgresql": "12.2.0",
     "drizzle-kit": "0.31.11"
   }
 }
