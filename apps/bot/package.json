@@ -15,10 +15,10 @@
     "@equinox/config": "workspace:*",
     "@equinox/core": "workspace:*",
     "@equinox/db": "workspace:*",
-    "bullmq": "6.3.9",
-    "discord.js": "14.27.0",
+    "bullmq": "6.7.1",
+    "discord.js": "14.28.1",
     "ioredis": "6.0.0",
-    "pino": "10.3.1"
+    "pino": "10.4.0"
   },
   "devDependencies": {
     "@testcontainers/redis": "12.1.0",
